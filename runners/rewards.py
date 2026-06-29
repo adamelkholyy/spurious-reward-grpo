@@ -1,0 +1,170 @@
+import random
+import re
+
+from backups.debug import maybe_debug_print_grpo
+from backups.utils import get_completion_text
+
+# Math-equivalence grading. math_verify is the standard tool used across the
+# RLVR literature (handles LaTeX, fractions, sets, etc.). We fall back to a
+# normalized string/float comparison if it isn't installed.
+try:
+    from math_verify import parse, verify
+
+    _HAS_MATH_VERIFY = True
+except Exception:  # pragma: no cover
+    _HAS_MATH_VERIFY = False
+
+
+# ---------------------------------------------------------------------------
+# Answer extraction / grading
+# ---------------------------------------------------------------------------
+def extract_boxed(text: str) -> str | None:
+    """Return the content of the LAST \\boxed{...} in `text` (balanced braces).
+
+    Qwen2.5-Math emits its final answer as \\boxed{...}; we take the last one
+    to handle "reason, then box" generations.
+    """
+    idx = text.rfind("\\boxed")
+    if idx == -1:
+        return None
+    open_brace = text.find("{", idx)
+    if open_brace == -1:
+        return None
+
+    depth = 0
+    for j in range(open_brace, len(text)):
+        c = text[j]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_brace + 1 : j].strip()
+    return None  # unbalanced
+
+
+def _normalize(s: str) -> str:
+    s = s.strip().strip("$").strip()
+    s = s.replace(",", "")
+    s = s.replace("\\!", "").replace("\\,", "").replace("\\ ", "")
+    s = s.replace("\\%", "").replace("%", "")
+    s = s.rstrip(".").strip()
+    return s
+
+
+def is_correct(response: str, gold) -> bool:
+    """True iff the boxed answer in `response` matches `gold`."""
+    if gold is None:
+        return False
+    pred = extract_boxed(response)
+    if pred is None:
+        return False
+
+    if _HAS_MATH_VERIFY:
+        try:
+            # verify(gold, target)
+            return bool(verify(parse(str(gold)), parse(pred)))
+        except Exception:
+            pass
+
+    p, g = _normalize(pred), _normalize(str(gold))
+    if p == g:
+        return True
+    try:
+        return abs(float(p) - float(g)) < 1e-6
+    except (ValueError, TypeError):
+        return False
+
+
+def _maybe_debug(kwargs, prompts, responses, answer, extracted, scores, header):
+    maybe_debug_print_grpo(
+        trainer_state=kwargs.get("trainer_state"),
+        prompts=prompts if prompts is not None else [""] * len(responses),
+        responses=responses,
+        answers=answer if answer is not None else [None] * len(responses),
+        extracted=extracted,
+        scores=scores,
+        header=header,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reward functions
+#
+# Every function returns a list[float] of length len(completions). TRL passes
+# `prompts`, `completions`, and each dataset column (here `answer`) as kwargs.
+# All rewards are binary {0, 1} to mirror the paper.
+# ---------------------------------------------------------------------------
+
+# --- Ground truth (the real signal / upper bound) --------------------------
+def ground_truth_reward(prompts, completions, answer, **kwargs):
+    """1.0 if the boxed answer is mathematically correct, else 0.0."""
+    responses = [get_completion_text(c) for c in completions]
+    extracted = [extract_boxed(r) for r in responses]
+    scores = [1.0 if is_correct(r, a) else 0.0 for r, a in zip(responses, answer)]
+    _maybe_debug(kwargs, prompts, responses, answer, extracted, scores,
+                 "GRPO ground_truth")
+    return scores
+
+
+# --- Random reward (zero correlation with correctness) ---------------------
+def random_reward(completions, **kwargs):
+    """Bernoulli(0.5), independent of the answer. The headline spurious reward."""
+    return [1.0 if random.random() < 0.5 else 0.0 for _ in completions]
+
+
+# --- Box-only format reward (rewards formatting, not correctness) ----------
+def box_only_format_reward(completions, **kwargs):
+    """1.0 if the response contains any \\boxed{...}, else 0.0."""
+    responses = [get_completion_text(c) for c in completions]
+    return [1.0 if extract_boxed(r) is not None else 0.0 for r in responses]
+
+
+# --- Incorrect reward (negative correlation) -------------------------------
+def incorrect_reward(prompts, completions, answer, **kwargs):
+    """1.0 iff the model produced a boxed answer that is WRONG.
+
+    No box -> 0.0 (so the model still can't trivially farm reward by stopping).
+    """
+    responses = [get_completion_text(c) for c in completions]
+    extracted = [extract_boxed(r) for r in responses]
+    scores = []
+    for r, box, a in zip(responses, extracted, answer):
+        if box is None:
+            scores.append(0.0)
+        else:
+            scores.append(0.0 if is_correct(r, a) else 1.0)
+    _maybe_debug(kwargs, prompts, responses, answer, extracted, scores,
+                 "GRPO incorrect")
+    return scores
+
+
+# --- "Mention python" reward (encourages Qwen code-reasoning) --------------
+def python_reward(completions, **kwargs):
+    """1.0 if the response mentions the word 'python', else 0.0.
+
+    Approximation of the paper's `contain_python_wo_backticks`. Surfaces the
+    Qwen2.5-Math "code reasoning" behaviour that the paper links to the gains.
+    """
+    responses = [get_completion_text(c) for c in completions]
+    return [1.0 if "python" in r.lower() else 0.0 for r in responses]
+
+
+# ---------------------------------------------------------------------------
+# Registry — pick the reward set with --reward on the CLI.
+# ---------------------------------------------------------------------------
+REWARD_REGISTRY = {
+    "ground_truth": [ground_truth_reward],  # real signal / upper bound
+    "random": [random_reward],              # spurious: no correlation
+    "box_only": [box_only_format_reward],   # spurious: format only
+    "incorrect": [incorrect_reward],        # spurious: negative correlation
+    "python": [python_reward],              # spurious: code-reasoning nudge
+}
+
+
+def get_reward_funcs(name: str):
+    if name not in REWARD_REGISTRY:
+        raise ValueError(
+            f"Unknown reward '{name}'. Choose from: {sorted(REWARD_REGISTRY)}"
+        )
+    return REWARD_REGISTRY[name]
