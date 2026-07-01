@@ -7,18 +7,16 @@ import wandb
 from peft import get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from backups.settings import LORA_CONFIG
-from backups.utils import resolve_output_dir
+from settings import LORA_CONFIG, GRPO_CONFIG
+from utils import resolve_output_dir
 
-from backups.runners.GRPORunner import GRPORunner
-from backups.runners.SFTRunner import SFTRunner
+from runners.GRPORunner import GRPORunner
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--method", choices=["sft", "grpo", "reward"], default="grpo")
 parser.add_argument(
     "--model",
-    default="Qwen/Qwen2.5-Math-7B",
+    default="Qwen/Qwen2.5-Math-1.5B",
     help="Spurious-reward effect is a Qwen2.5-Math property. "
          "Use Qwen/Qwen2.5-Math-1.5B for a much cheaper run.",
 )
@@ -39,6 +37,18 @@ parser.add_argument(
     default=None,
     help="Explicit output directory (overrides --output_root/--run_name).",
 )
+parser.add_argument(
+    "--lora",
+    default=False,
+    action="store_true",
+    help="Enable lora"
+)
+parser.add_argument(
+    "--attn",
+    choices=["flash_attention_2", "sdpa"],
+    default="flash_attention_2",
+    help="Attention implementation",
+)
 args = parser.parse_args()
 
 
@@ -50,13 +60,10 @@ if __name__ == "__main__":
     )
 
     args.output_dir = resolve_output_dir(args)
-
-    match args.method:
-        case "sft": post_trainer = SFTRunner()
-        case "grpo": post_trainer = GRPORunner()
+    post_trainer = GRPORunner()
 
     print(
-        f"Benchmarking {args.model}, method={args.method}, "
+        f"Benchmarking {args.model}, method=GRPO, "
         f"reward={args.reward}, task=DeepScaleR\n"
         f"Checkpoints/logs -> {args.output_dir}"
     )
@@ -66,20 +73,26 @@ if __name__ == "__main__":
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    if GRPO_CONFIG.get("fp16"):
+        print("Using fp16")
+        precision_dtype = torch.float32
+    else:
+        precision_dtype = torch.bfloat16
+
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
-        torch_dtype=torch.bfloat16,
+        dtype=precision_dtype,
         trust_remote_code=True,
-        attn_implementation= "sdpa", # NOTE: change back "flash_attention_2",
+        attn_implementation=args.attn, 
+
         # NOTE: device_map="auto" is fine on a single GPU. For multi-GPU GRPO,
         # drop it and launch with `accelerate launch` so Accelerate handles
         # device placement (device_map="auto" conflicts with DDP).
         # device_map="auto",
     )
 
-    if args.method == "grpo":
-        print("Running GRPO: LoRA disabled, training all parameters")
-    else:
+    if args.lora:
+        print(f"LoRA enabled with config: {LORA_CONFIG}")
         model = get_peft_model(model, LORA_CONFIG)
         model.print_trainable_parameters()
 

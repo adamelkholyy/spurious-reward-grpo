@@ -16,4 +16,8 @@ export FLASHINFER_WORKSPACE_DIR=/local/scratch/ae581/.cache/flashinfer
 export VLLM_CACHE_ROOT=/local/scratch/ae581/.cache/vllm
 
 
-CUDA_VISIBLE_DEVICES=1 accelerate launch trainer.py --method grpo --reward ground_truth --run_name grpo_default
+# CUDA_VISIBLE_DEVICES=1 python eval_math500.py --models base=Qwen/Qwen2.5-Math-1.5B # gt=outputs/grpo_base-1782733692/checkpoint-grpo_ground_truth
+# CUDA_VISIBLE_DEVICES=1 accelerate launch trainer.py --reward random --run_name grpo_random
+
+CUDA_VISIBLE_DEVICES=1 python eval_math500.py --models base=Qwen/Qwen2.5-Math-1.5B gt=outputs/grpo_random_qwen1.5/checkpoint-grpo_random
+ 

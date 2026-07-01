@@ -1,7 +1,7 @@
 import logging
 from typing import Any
 
-from backups.settings import DEBUG_EVERY, DEBUG_N
+from settings import DEBUG_EVERY, DEBUG_N
 
 logger = logging.getLogger(__name__)
 

@@ -1,7 +1,7 @@
 from abc import abstractmethod
 
 from datasets import Dataset, load_dataset
-from backups.utils import strip_calculator_annotations
+from utils import strip_calculator_annotations
 
 class PostTrainer:
 

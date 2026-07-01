@@ -1,8 +1,7 @@
 import random
-import re
 
-from backups.debug import maybe_debug_print_grpo
-from backups.utils import get_completion_text
+from debug import maybe_debug_print_grpo
+from utils import get_completion_text
 
 # Math-equivalence grading. math_verify is the standard tool used across the
 # RLVR literature (handles LaTeX, fractions, sets, etc.). We fall back to a

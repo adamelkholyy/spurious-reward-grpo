@@ -1,10 +1,10 @@
 from datasets import Dataset, load_dataset
 from trl import GRPOConfig, GRPOTrainer
 
-from backups.runners.PostTrainer import PostTrainer
-from backups.runners.rewards import get_reward_funcs
-from backups.settings import GRPO_CONFIG, system_prompt
-from backups.utils import save_model
+from runners.PostTrainer import PostTrainer
+from runners.rewards import get_reward_funcs
+from settings import GRPO_CONFIG, system_prompt
+from utils import save_model
 
 
 class GRPORunner(PostTrainer):

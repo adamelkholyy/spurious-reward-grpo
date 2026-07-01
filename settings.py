@@ -42,17 +42,49 @@ COMMON = dict(
 #     anchor for stability.
 #   * Qwen2.5-Math has a 4096-token context, so keep
 #     max_prompt_length + max_completion_length < 4096.
+
+
+####### Shao paper settings #######
+# learning_rate=5e-7,             
+# lr_scheduler_type="constant",    
+# per_device_train_batch_size=16,  
+# gradient_accumulation_steps=8,  # gen batch = 16*8 = 128 / G=16 -> 8 prompts/step
+# num_generations=16,    
+
+
+####### Chen paper settings #######
+# learning_rate=5e-7,             # Chen: 5e-7 constant — already matched
+# per_device_train_batch_size=16, # keep
+# gradient_accumulation_steps=8,  # gen batch 128 -> 8 prompts/step (see caveat)
+# lr_scheduler_type="constant",   # Chen holds LR flat — already matched
+# num_generations=16,             # Chen: G=16 — already matched
+# epsilon=0.2,                    # ADD — Chen uses symmetric clip eps=0.2
+# max_completion_length=3072,     # was 2048 — Chen uses ~4096 rollout on Qwen-Math;
+#                                 # 1024+3072=4096 = the context window
+### vllm_max_model_len=4096,        # ADD — must cover prompt+completion
+
+###### prev default settings #####
+# learning_rate=3e-6,              
+# per_device_train_batch_size=8,   
+# gradient_accumulation_steps=8,  
+# gradient_checkpointing=True,
+# num_generations=8,               
+# temperature=1.0,                 
+# beta=0.0,                       # KL coeff = 0.0 -> no reference model
+# max_completion_length=2048,     
+# max_steps=300,        
+
 GRPO_CONFIG = dict(
-    learning_rate=1e-6,             # 7B; use ~3e-6 for the 1.5B variant
-    per_device_train_batch_size=2,  # small batch for GPU memory
-    gradient_accumulation_steps=8,  # gen batch = 2 * 8 = 16 -> 2 prompts/step
-    gradient_checkpointing=True,
-    num_generations=4,              # NOTE: inbcrease later
-    temperature=1.0,                # rollout sampling temperature (exploration)
-    beta=0.0,                       # KL coeff; 0.0 => no reference model
-    # max_prompt_length=1024,
-    max_completion_length=1400,     # NOTE: increase later
-    max_steps=300,                  # NOTE: increase later
+    learning_rate=5e-7,             # Chen: 5e-7 constant — already matched
+    per_device_train_batch_size=8, # keep
+    gradient_accumulation_steps=8,  # gen batch 128 -> 8 prompts/step (see caveat)
+    lr_scheduler_type="constant",   # Chen holds LR flat — already matched
+    num_generations=16,             # Chen: G=16 — already matched
+    epsilon=0.2,                    # ADD — Chen uses symmetric clip eps=0.2
+    temperature=1.0,                 
+    beta=0.0,                       # KL coeff = 0.0 -> no reference model
+    max_completion_length=2048,     
+    max_steps=300,                  
     num_train_epochs=1,             # ignored once max_steps is set
     logging_steps=5,
     save_steps=250,
@@ -63,20 +95,20 @@ GRPO_CONFIG = dict(
     # vllm acceleration
     use_vllm=True,
     vllm_mode="colocate",
-    vllm_gpu_memory_utilization=0.25,   # KV-cache share on the same GPU; tune this
+    vllm_gpu_memory_utilization=0.25,   # KV-cache share on same GPU
     vllm_enable_sleep_mode=True,        # offload vLLM weights/cache during the optimizer step
-    optim="paged_adamw_8bit",   # in GRPO_CONFIG; needs bitsandbytes installed
-    # vllm_max_model_len=3072,          # set >= max_prompt_length + max_completion_length
+    optim="paged_adamw_8bit",   
+    # vllm_max_model_len=3072,          # set = max_prompt_length + max_completion_length
 )
 
 
 LORA_CONFIG = LoraConfig(
-    r=16,  # Rank: adaptation capacity (16 good for reasoning tasks)
-    lora_alpha=32,  # Scaling factor (typically 2x rank)
+    r=16,  # rank: adaptation capacity  
+    lora_alpha=32,  # scaling factor is typically 2x rank
     target_modules="all-linear",
-    lora_dropout=0.1,  # Regularization to prevent overfitting
-    bias="none",  # Skip bias adaptation for simplicity
-    task_type="CAUSAL_LM",  # Causal language modeling task
+    lora_dropout=0.1,   
+    bias="none",  # skip bias adaptation for simplicity
+    task_type="CAUSAL_LM",  # causal language modeling task
 )
 
 # Debug configuration
