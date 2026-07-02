@@ -3,6 +3,7 @@ import time
 
 import torch
 import wandb
+import logging
 
 from peft import get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -12,6 +13,7 @@ from utils import resolve_output_dir
 
 from runners.GRPORunner import GRPORunner
 
+logging.basicConfig(level=logging.INFO)
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -75,7 +77,7 @@ if __name__ == "__main__":
 
     if GRPO_CONFIG.get("fp16"):
         print("Using fp16")
-        precision_dtype = torch.float32
+        precision_dtype = torch.float16    
     else:
         precision_dtype = torch.bfloat16
 

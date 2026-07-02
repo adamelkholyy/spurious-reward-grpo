@@ -1,4 +1,5 @@
 import random
+import wandb
 
 from debug import maybe_debug_print_grpo
 from utils import get_completion_text
@@ -105,12 +106,16 @@ def ground_truth_reward(prompts, completions, answer, **kwargs):
                  "GRPO ground_truth")
     return scores
 
-
-# --- Random reward (zero correlation with correctness) ---------------------
 def random_reward(completions, **kwargs):
-    """Bernoulli(0.5), independent of the answer. The headline spurious reward."""
-    return [1.0 if random.random() < 0.5 else 0.0 for _ in completions]
-
+    responses = [get_completion_text(c) for c in completions]
+    code_freq = sum("python" in r.lower() for r in responses) / len(responses)
+    try:
+        if wandb.run is not None:
+            wandb.log({"train/code_frequency": code_freq}, commit=False)
+    except Exception:
+        pass
+    gamma = 0.5
+    return [1.0 if random.random() < gamma else 0.0 for _ in completions]
 
 # --- Box-only format reward (rewards formatting, not correctness) ----------
 def box_only_format_reward(completions, **kwargs):

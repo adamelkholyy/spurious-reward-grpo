@@ -50,4 +50,4 @@ def maybe_debug_print_grpo(
             lines.append(f"[REWARD] {scores[i]}")
     lines.append(f"{sep}\n")
 
-    logger.debug("\n".join(lines))
+    logger.info("\n".join(lines))  
