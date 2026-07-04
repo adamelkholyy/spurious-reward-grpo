@@ -18,16 +18,53 @@ logging.basicConfig(level=logging.INFO)
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--model",
-    default="Qwen/Qwen2.5-Math-1.5B",
-    help="Spurious-reward effect is a Qwen2.5-Math property. "
-         "Use Qwen/Qwen2.5-Math-1.5B for a much cheaper run.",
+    default="Qwen/Qwen2.5-1.5B-Instruct",
+    help="Park et al. 2509.26114 random-reward base models: "
+         "Qwen/Qwen2.5-1.5B-Instruct (main), meta-llama/Llama-3.2-1B-Instruct, "
+         "allenai/OLMo-2-0425-1B-Instruct. True-reward GSM8K runs: "
+         "Qwen/Qwen2.5-3B-Instruct.",
+)
+parser.add_argument(
+    "--dataset",
+    choices=["gsm8k", "deepscaler"],
+    default="gsm8k",
+    help="'gsm8k' = Park et al. 2509.26114 setup (default). "
+         "'deepscaler' = legacy Shao-style spurious-rewards setup.",
 )
 parser.add_argument(
     "--reward",
-    choices=["ground_truth", "random", "box_only", "incorrect", "python"],
-    default="ground_truth",
-    help="GRPO reward signal. 'ground_truth' is the upper bound; the rest are "
-         "the spurious rewards from the paper.",
+    choices=["ground_truth", "random", "random_p03", "random_p07", "gaussian",
+             "gsm8k", "gsm8k_flexible", "box_only", "incorrect", "python"],
+    default=None,
+    help="GRPO reward signal. Defaults per dataset: gsm8k->'random' "
+         "(Park random-reward runs; use 'gsm8k' for their true-reward RLVR), "
+         "deepscaler->'ground_truth'.",
+)
+parser.add_argument(
+    "--eps_low",
+    type=float,
+    default=None,
+    help="Clip-low epsilon. Paper baseline 0.2; 1.0 disables clip-low. "
+         "None -> config default (0.2).",
+)
+parser.add_argument(
+    "--eps_high",
+    type=str,
+    default=None,
+    help="Clip-high epsilon. Paper baseline symmetric (leave unset); "
+         "'inf' disables clip-high; e.g. 0.28 for DAPO-style clip-higher.",
+)
+parser.add_argument(
+    "--max_steps",
+    type=int,
+    default=None,
+    help="Total optimizer steps (16 per rollout round). Default ~1 GSM8K epoch (232).",
+)
+parser.add_argument(
+    "--seed",
+    type=int,
+    default=None,
+    help="Random seed (run >=2-3 seeds for entropy curves).",
 )
 parser.add_argument(
     "--run_name",
@@ -59,6 +96,15 @@ if __name__ == "__main__":
         entity="adamelkholy25-university-of-cambridge",
         project="dissertation",
         name=args.run_name,
+        config={
+            "model": args.model,
+            "dataset": args.dataset,
+            "reward": args.reward,
+            "eps_low": args.eps_low,
+            "eps_high": args.eps_high,
+            "max_steps": args.max_steps,
+            "seed": args.seed,
+        },
     )
 
     args.output_dir = resolve_output_dir(args)
@@ -66,7 +112,7 @@ if __name__ == "__main__":
 
     print(
         f"Benchmarking {args.model}, method=GRPO, "
-        f"reward={args.reward}, task=DeepScaleR\n"
+        f"reward={args.reward}, dataset={args.dataset}\n"
         f"Checkpoints/logs -> {args.output_dir}"
     )
     start = time.time()

@@ -4,6 +4,6 @@ outputs/
 runners/__pycache__/
 .gitconfig
 *.json
-run.sh
+*.sh
 settings.py
 eval_math500.py

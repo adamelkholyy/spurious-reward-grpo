@@ -30,7 +30,7 @@ def resolve_output_dir(cli_args):
     if cli_args.output_dir:
         out = cli_args.output_dir
     else:
-        run_name = cli_args.run_name or f"{cli_args.method}_gsm8k"
+        run_name = cli_args.run_name or f"{getattr(cli_args, 'method', 'grpo')}_gsm8k"
         out = os.path.join("outputs", run_name)
 
     if os.path.exists(out):
