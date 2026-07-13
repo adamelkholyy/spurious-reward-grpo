@@ -7,3 +7,4 @@ runners/__pycache__/
 *.sh
 settings.py
 eval_math500.py
+eval_gsm8k.py

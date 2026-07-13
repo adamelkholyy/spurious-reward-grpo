@@ -14,7 +14,6 @@ class PostTrainer:
 
     @staticmethod
     def format_gsm8k(x: dict) -> dict:
-        # single text field used for DPO, KTO, RewardTrainer
         answer = strip_calculator_annotations(x["answer"])
         return {"text": f"Question: {x['question']}\nAnswer: {answer}"}
 

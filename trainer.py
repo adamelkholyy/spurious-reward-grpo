@@ -1,17 +1,18 @@
 import argparse
-import time
 
 import torch
 import wandb
 import logging
 
-from peft import get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from settings import LORA_CONFIG, GRPO_CONFIG
 from utils import resolve_output_dir
-
 from runners.GRPORunner import GRPORunner
+
+# added
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -43,14 +44,14 @@ parser.add_argument(
 parser.add_argument(
     "--eps_low",
     type=float,
-    default=None,
+    default=0.2,
     help="Clip-low epsilon. Paper baseline 0.2; 1.0 disables clip-low. "
          "None -> config default (0.2).",
 )
 parser.add_argument(
     "--eps_high",
     type=str,
-    default=None,
+    default=0.2,
     help="Clip-high epsilon. Paper baseline symmetric (leave unset); "
          "'inf' disables clip-high; e.g. 0.28 for DAPO-style clip-higher.",
 )
@@ -63,13 +64,18 @@ parser.add_argument(
 parser.add_argument(
     "--seed",
     type=int,
-    default=None,
+    default=0,
     help="Random seed (run >=2-3 seeds for entropy curves).",
 )
 parser.add_argument(
     "--run_name",
     default="run",
     help="Run name used to form output dir (default: <method>_<task>).",
+)
+parser.add_argument(
+    "--lr",
+    default=None,
+    help="learning_rate",
 )
 parser.add_argument(
     "--output_dir",
@@ -92,6 +98,8 @@ args = parser.parse_args()
 
 
 if __name__ == "__main__":
+    args.run_name = f"{args.run_name}_low={args.eps_low}_high={args.eps_high}_s{args.seed}" # _steps={args.max_steps}"
+
     run = wandb.init(
         entity="adamelkholy25-university-of-cambridge",
         project="dissertation",
@@ -115,38 +123,17 @@ if __name__ == "__main__":
         f"reward={args.reward}, dataset={args.dataset}\n"
         f"Checkpoints/logs -> {args.output_dir}"
     )
-    start = time.time()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    if GRPO_CONFIG.get("fp16"):
-        print("Using fp16")
-        precision_dtype = torch.float16    
-    else:
-        precision_dtype = torch.bfloat16
-
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
-        dtype=precision_dtype,
+        dtype=torch.bfloat16,
         trust_remote_code=True,
         attn_implementation=args.attn, 
-
-        # NOTE: device_map="auto" is fine on a single GPU. For multi-GPU GRPO,
-        # drop it and launch with `accelerate launch` so Accelerate handles
-        # device placement (device_map="auto" conflicts with DDP).
-        # device_map="auto",
     )
-
-    if args.lora:
-        print(f"LoRA enabled with config: {LORA_CONFIG}")
-        model = get_peft_model(model, LORA_CONFIG)
-        model.print_trainable_parameters()
 
     post_trainer.run(model, tokenizer, args)
 
-    time_taken = time.time() - start
-    hrs, rem = divmod(time_taken, 3600)
-    mins, secs = divmod(rem, 60)
-    print(f"Completed in {int(hrs)}h {int(mins)}m {secs:.2f}s")

@@ -54,28 +54,87 @@ def _normalize(s: str) -> str:
     return s
 
 
-def is_correct(response: str, gold) -> bool:
-    """True iff the boxed answer in `response` matches `gold`."""
-    if gold is None:
-        return False
-    pred = extract_boxed(response)
-    if pred is None:
-        return False
-
-    if _HAS_MATH_VERIFY:
-        try:
-            # verify(gold, target)
-            return bool(verify(parse(str(gold)), parse(pred)))
-        except Exception:
-            pass
-
-    p, g = _normalize(pred), _normalize(str(gold))
+def _fast_equal(pred: str, gold: str) -> bool:
+    """Cheap normalized string/float equality. Only trusted for POSITIVE
+    matches — a mismatch here may still be mathematically equal (e.g.
+    '1/2' vs '0.5'), so negatives fall through to math_verify."""
+    p, g = _normalize(pred), _normalize(gold)
     if p == g:
         return True
     try:
         return abs(float(p) - float(g)) < 1e-6
     except (ValueError, TypeError):
         return False
+
+
+# --- math_verify worker (runs in subprocesses) ------------------------------
+from functools import lru_cache
+
+
+@lru_cache(maxsize=8192)
+def _parse_cached(expr: str):
+    return parse(expr)
+
+
+def _verify_pair(args) -> bool:
+    """(pred, gold_str) -> bool. Runs inside a pool worker; gold parses are
+    cached per worker, which pays off since each prompt's gold is graded
+    num_generations times."""
+    pred, gold_str = args
+    try:
+        return bool(verify(_parse_cached(gold_str), parse(pred)))
+    except Exception:
+        return _fast_equal(pred, gold_str)
+
+
+_POOL = None
+
+
+def _get_pool():
+    """Lazy persistent pool — created once, reused every reward call, so we
+    don't pay process-spawn cost per training cycle. Workers are CPU-only
+    (sympy); they never touch CUDA."""
+    global _POOL
+    if _POOL is None:
+        import multiprocessing as mp
+        import os
+
+        ctx = mp.get_context("fork")
+        _POOL = ctx.Pool(processes=min(16, os.cpu_count() or 8))
+    return _POOL
+
+
+def batch_is_correct(responses: list[str], golds: list) -> list[bool]:
+    """Grade a whole batch. Fast path settles simple numeric matches
+    instantly; only the remaining cases hit math_verify, in parallel."""
+    preds = [extract_boxed(r) for r in responses]
+    results: list[bool | None] = [None] * len(preds)
+    hard: list[int] = []
+
+    for i, (p, g) in enumerate(zip(preds, golds)):
+        if g is None or p is None:
+            results[i] = False
+        elif _fast_equal(p, str(g)):
+            results[i] = True
+        elif not _HAS_MATH_VERIFY:
+            results[i] = False  # fast path already covered the fallback logic
+        else:
+            hard.append(i)
+
+    if hard:
+        # chunk so all 8 generations of a prompt tend to share a worker,
+        # maximising the per-worker gold-parse cache hit rate
+        pairs = [(preds[i], str(golds[i])) for i in hard]
+        verdicts = _get_pool().map(_verify_pair, pairs, chunksize=8)
+        for i, ok in zip(hard, verdicts):
+            results[i] = ok
+
+    return results  # type: ignore[return-value]
+
+
+def is_correct(response: str, gold) -> bool:
+    """Single-sample grading (kept for external callers/tests)."""
+    return batch_is_correct([response], [gold])[0]
 
 
 def _maybe_debug(kwargs, prompts, responses, answer, extracted, scores, header):
@@ -102,10 +161,11 @@ def _maybe_debug(kwargs, prompts, responses, answer, extracted, scores, header):
 def ground_truth_reward(prompts, completions, answer, **kwargs):
     """1.0 if the boxed answer is mathematically correct, else 0.0."""
     responses = [get_completion_text(c) for c in completions]
-    extracted = [extract_boxed(r) for r in responses]
-    scores = [1.0 if is_correct(r, a) else 0.0 for r, a in zip(responses, answer)]
-    _maybe_debug(kwargs, prompts, responses, answer, extracted, scores,
-                 "GRPO ground_truth")
+    # extracted = [extract_boxed(r) for r in responses]
+    correct = batch_is_correct(responses, answer)
+    scores = [1.0 if ok else 0.0 for ok in correct]
+    # _maybe_debug(kwargs, prompts, responses, answer, extracted, scores,
+    #              "GRPO ground_truth")
     return scores
 
 def random_reward(completions, **kwargs):
@@ -180,8 +240,8 @@ def gsm8k_reward(prompts, completions, answer, **kwargs):
         1.0 if (e is not None and _num_equal(e, a)) else 0.0
         for e, a in zip(extracted, answer)
     ]
-    _maybe_debug(kwargs, prompts, responses, answer, extracted, scores,
-                 "GRPO gsm8k_strict")
+    # _maybe_debug(kwargs, prompts, responses, answer, extracted, scores,
+    #              "GRPO gsm8k_strict")
     return scores
 
 
@@ -195,8 +255,8 @@ def gsm8k_flexible_reward(prompts, completions, answer, **kwargs):
         1.0 if (e is not None and _num_equal(e, a)) else 0.0
         for e, a in zip(extracted, answer)
     ]
-    _maybe_debug(kwargs, prompts, responses, answer, extracted, scores,
-                 "GRPO gsm8k_flexible")
+    # _maybe_debug(kwargs, prompts, responses, answer, extracted, scores,
+    #              "GRPO gsm8k_flexible")
     return scores
 
 # --- Box-only format reward (rewards formatting, not correctness) ----------
@@ -214,14 +274,13 @@ def incorrect_reward(prompts, completions, answer, **kwargs):
     """
     responses = [get_completion_text(c) for c in completions]
     extracted = [extract_boxed(r) for r in responses]
-    scores = []
-    for r, box, a in zip(responses, extracted, answer):
-        if box is None:
-            scores.append(0.0)
-        else:
-            scores.append(0.0 if is_correct(r, a) else 1.0)
-    _maybe_debug(kwargs, prompts, responses, answer, extracted, scores,
-                 "GRPO incorrect")
+    correct = batch_is_correct(responses, answer)
+    scores = [
+        0.0 if box is None else (0.0 if ok else 1.0)
+        for box, ok in zip(extracted, correct)
+    ]
+    # _maybe_debug(kwargs, prompts, responses, answer, extracted, scores,
+    #              "GRPO incorrect")
     return scores
 
 
