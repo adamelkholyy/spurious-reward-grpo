@@ -7,13 +7,10 @@ import logging
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from utils import resolve_output_dir
-from runners.GRPORunner import GRPORunner
+from GRPORunner import GRPORunner
 
-# added
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-
-
 logging.basicConfig(level=logging.INFO)
 
 parser = argparse.ArgumentParser()
@@ -98,7 +95,7 @@ args = parser.parse_args()
 
 
 if __name__ == "__main__":
-    args.run_name = f"{args.run_name}_low={args.eps_low}_high={args.eps_high}_s{args.seed}" # _steps={args.max_steps}"
+    args.run_name = f"{args.run_name}_low={args.eps_low}_high={args.eps_high}_s{args.seed}"  
 
     run = wandb.init(
         entity="adamelkholy25-university-of-cambridge",

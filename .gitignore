@@ -8,3 +8,4 @@ runners/__pycache__/
 settings.py
 eval_math500.py
 eval_gsm8k.py
+measure_entropy.py

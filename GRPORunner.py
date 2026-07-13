@@ -1,9 +1,9 @@
 from datasets import Dataset, load_dataset
 from trl import GRPOConfig, GRPOTrainer
 
-from runners.rewards import get_reward_funcs
+from rewards import get_reward_funcs
 from settings import (INF_EPS_HIGH,
-                      PARK_GRPO_CONFIG, system_prompt)
+                      GRPO_CONFIG, system_prompt)
 
 GSM8K_INSTRUCTION = (
     'Let\'s think step by step and output the final answer after "####".'
@@ -38,37 +38,20 @@ class GRPORunner():
 
 
     def run(self, model, tokenizer, args):
+        
         dataset_name = getattr(args, "dataset", "gsm8k")
 
         if dataset_name == "gsm8k":
             ds = self.load_gsm8k_rl(tokenizer)
-            config = dict(PARK_GRPO_CONFIG)
             default_reward = "random"
         else:  # DeepScaleR
             ds = self.convert_to_grpo(self.load_math(), tokenizer)
-            config = dict(PARK_GRPO_CONFIG)
             default_reward = "ground_truth"
 
         reward_name = getattr(args, "reward", None) or default_reward
         reward_funcs = get_reward_funcs(reward_name)
 
-        if getattr(args, "eps_low", None) is not None:
-            config["epsilon"] = float(args.eps_low)
-        if getattr(args, "eps_high", None) is not None:
-            eh = args.eps_high
-            config["epsilon_high"] = (
-                INF_EPS_HIGH if str(eh).lower() in ("inf", "infinity")
-                else float(eh)
-            )
-        if getattr(args, "max_steps", None) is not None:
-            config["max_steps"] = int(args.max_steps)
-        if getattr(args, "seed", None) is not None:
-            config["seed"] = int(args.seed)
-        if getattr(args, "lr", None) is not None:
-            config["learning_rate"] = float(args.lr)
-
-        config["output_dir"] = args.output_dir
-
+        config = self.handle_grpo_config_args(args)
         self.print_config(config)
         grpo_args = GRPOConfig(**config)
 
@@ -80,6 +63,7 @@ class GRPORunner():
             train_dataset=ds,
         )
         trainer.train()
+
 
     # DeepScaleR 
     def convert_to_grpo(self, ds: Dataset, tokenizer) -> Dataset:
@@ -102,6 +86,33 @@ class GRPORunner():
             msgs, tokenize=False, add_generation_prompt=True
         )
         return {"prompt": prompt, "answer": answer}
+
+
+    @staticmethod
+    def handle_grpo_config_args( args):
+
+        config = dict(GRPO_CONFIG)
+
+        if getattr(args, "eps_low", None) is not None:
+            config["epsilon"] = float(args.eps_low)
+        if getattr(args, "eps_high", None) is not None:
+            eh = args.eps_high
+            config["epsilon_high"] = (
+                INF_EPS_HIGH if str(eh).lower() in ("inf", "infinity")
+                else float(eh)
+            )
+        if getattr(args, "max_steps", None) is not None:
+            config["max_steps"] = int(args.max_steps)
+        if getattr(args, "seed", None) is not None:
+            config["seed"] = int(args.seed)
+        if getattr(args, "lr", None) is not None:
+            config["learning_rate"] = float(args.lr)
+
+        if args.model == "meta-llama/Llama-3.2-1B-Instruct":
+            config["vllm_gpu_memory_utilization"] = 0.40
+
+        config["output_dir"] = args.output_dir
+        return config
 
 
     @staticmethod

@@ -3,7 +3,6 @@ import re
 
 import wandb
 
-from debug import maybe_debug_print_grpo
 from utils import get_completion_text
 
 # Math-equivalence grading. math_verify is the standard tool used across the
@@ -136,17 +135,6 @@ def is_correct(response: str, gold) -> bool:
     """Single-sample grading (kept for external callers/tests)."""
     return batch_is_correct([response], [gold])[0]
 
-
-def _maybe_debug(kwargs, prompts, responses, answer, extracted, scores, header):
-    maybe_debug_print_grpo(
-        trainer_state=kwargs.get("trainer_state"),
-        prompts=prompts if prompts is not None else [""] * len(responses),
-        responses=responses,
-        answers=answer if answer is not None else [None] * len(responses),
-        extracted=extracted,
-        scores=scores,
-        header=header,
-    )
 
 
 # ---------------------------------------------------------------------------
