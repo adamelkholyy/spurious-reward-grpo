@@ -5,7 +5,4 @@ runners/__pycache__/
 .gitconfig
 *.json
 *.sh
-settings.py
 eval_math500.py
-eval_gsm8k.py
-measure_entropy.py
