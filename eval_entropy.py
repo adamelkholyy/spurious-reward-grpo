@@ -686,7 +686,7 @@ def main():
                 "--max-new-tokens", str(args.max_new_tokens),
                 "--temperature", str(args.temperature),
                 "--seed", str(args.seed),
-                "--attn", "sdpa" if HPC else "flash_attention_2",
+                # "--attn", "sdpa" if HPC else "flash_attention_2",
             ]
             print(f"\n=== [{pos}] Measuring '{label}'  ({path}) ===",
                   flush=True)

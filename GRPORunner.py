@@ -52,12 +52,20 @@ class GRPORunner():
         config = dict(GRPO_CONFIG)
 
         if HPC: # CSD3 specific settings
-            if "Qwen" in  getattr(args, "model", None):
+            if "Qwen" in  args.model:
                 config["vllm_gpu_memory_utilization"] = 0.22
                 config["per_device_train_batch_size"] = 8 
                 config["gradient_accumulation_steps"] = 8  
                 print("Qwen, lowering memory usage")
-
+        else: # Flamingo specific settings 
+            if "0.5B" in args.model:
+                config["vllm_gpu_memory_utilization"] = 0.5
+                print("Qwen-0.5B, increasing memory usage")
+            if "3B" in args.model:
+                config["vllm_gpu_memory_utilization"] = 0.275 # could be increased
+                config["per_device_train_batch_size"] = 4 
+                config["gradient_accumulation_steps"] = 16
+                print("Qwen-3B, decreasing memory usage")
 
         if getattr(args, "eps_low", None) is not None:
             config["epsilon"] = float(args.eps_low)

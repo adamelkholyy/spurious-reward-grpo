@@ -91,7 +91,7 @@ parser.add_argument(
 
 parser.add_argument(
     "--switch_step",
-    default=400,
+    default=None,
     help="Step at which to switch epsilon params and reward"
 )
 parser.add_argument(

@@ -33,8 +33,8 @@ def resolve_output_dir(cli_args):
         run_name = cli_args.run_name or f"{getattr(cli_args, 'method', 'grpo')}_gsm8k"
         out = os.path.join("outputs", run_name)
 
-    if os.path.exists(out):
-        out = f"{out}-{int(time.time())}"
+    # if os.path.exists(out):
+    #     out = f"{out}-{int(time.time())}"
 
     os.makedirs(out, exist_ok=True)
     return out

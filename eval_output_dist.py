@@ -845,7 +845,7 @@ def main():
                 "--seed", str(args.seed),
                 "--batch-size", str(args.batch_size),
                 "--score-batch-size", str(args.score_batch_size),
-                "--attn", "sdpa" if HPC else "flash_attention_2",
+                # "--attn", "sdpa" if HPC else "flash_attention_2",
             ]
             if args.no_texts:
                 cmd.append("--no-texts")
