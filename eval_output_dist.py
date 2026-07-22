@@ -11,6 +11,16 @@ per completion token, BOTH the logprob of the realized token and the
 full-distribution entropy. It also greedy-decodes each prompt as a
 high-probability reference trajectory (optional beam search).
 
+Measurement settings (prompt format, seeded prompt sampling, and the
+default 128-prompt x 8-rollout geometry) are aligned with
+eval_entropy_gsm8k.py so the two scripts measure the same rollout
+distribution: system prompt "Please reason step by step, and put your
+final answer within \\boxed{}." + bare question, no stop strings, EOS-only
+completion masking. Per-rollout metrics (mean_entropy = per-sequence
+entropy sum / token count, etc.) are unchanged; note this remains a
+per-rollout mean — compare against eval_entropy_gsm8k's
+per_generation_mean_nats, not its token-weighted token_mean_entropy_nats.
+
 Harness behavior matches eval_gsm8k.py:
   - each model runs in a fresh subprocess so the GPU is released cleanly
   - models auto-discovered from outputs/ (or given via --models label=path)
@@ -75,10 +85,9 @@ BASE_MODELS = {
     "olmo": "allenai/OLMo-2-0425-1B-Instruct",
 }
 
-# verl's exact GSM8K instruction suffix (same as GRPORunner.GSM8K_INSTRUCTION)
-GSM8K_INSTRUCTION = (
-    'Let\'s think step by step and output the final answer after "####".'
-)
+# Prompt — MUST be identical to eval_entropy_gsm8k.py / eval_gsm8k.py (and
+# the TRL training data builder): system prompt + bare question.
+SYSTEM_PROMPT = "Please reason step by step, and put your final answer within \\boxed{}."
 
 # Metrics whose sampled-pool distributions are exported for plotting.
 DIST_METRICS = ["avg_logprob", "logprob_per_char", "mean_entropy",
@@ -86,11 +95,11 @@ DIST_METRICS = ["avg_logprob", "logprob_per_char", "mean_entropy",
 
 
 # ---------------------------------------------------------------------------
-# Prompts — GSM8K *train* split formatted exactly like GRPORunner.load_gsm8k_rl
-# (user message = question + verl instruction suffix, chat template with
-# add_generation_prompt=True). This intentionally differs from the eval
-# script's system-prompt/\boxed{} format: distributions are measured under
-# the same prompt the policy was trained to roll out on.
+# Prompts — GSM8K *train* split, formatted IDENTICALLY to
+# eval_entropy_gsm8k.py: system prompt + bare question, chat template with
+# add_generation_prompt=True. Same seeded sampling (random.Random(seed)
+# over dataset indices), so with the same seed/num_prompts both scripts
+# see the exact same questions in the same order.
 #
 # Fallback: if a tokenizer ships no chat template (e.g. OLMo-2 base), we
 # apply explicit ChatML anyway (same rationale as eval_gsm8k.py — one prompt
@@ -113,16 +122,20 @@ def build_prompts(tokenizer, num_prompts: int, seed: int):
     has_template = bool(getattr(tokenizer, "chat_template", None))
     prompts, questions = [], []
     for i in idxs:
-        question = f"{ds[i]['question']} {GSM8K_INSTRUCTION}"
+        question = ds[i]["question"]
         if has_template:
-            msgs = [{"role": "user", "content": question}]
+            msgs = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": question},
+            ]
             prompts.append(tokenizer.apply_chat_template(
                 msgs, tokenize=False, add_generation_prompt=True))
         else:
             prompts.append(
+                f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
                 f"<|im_start|>user\n{question}<|im_end|>\n"
                 f"<|im_start|>assistant\n")
-        questions.append(ds[i]["question"])
+        questions.append(question)
     template = "tokenizer_chat_template" if has_template else "chatml_fallback"
     return prompts, questions, template
 
@@ -145,18 +158,16 @@ def set_all_seeds(seed: int):
 
 
 def completion_end_mask(comp, model, tokenizer):
-    """Bool mask over completion tokens: True up to and incl. the first
-    terminator (EOS or, when it differs, the pad token — HF pads finished
-    sequences in a batch with pad_token_id)."""
+    """Bool mask over completion tokens: True up to and incl. the FIRST EOS;
+    everything after is padding. EOS-only terminators, identical to
+    eval_entropy_gsm8k.py (HF only emits pad_token_id after a row has hit
+    EOS, so the cumsum below already excludes batch padding)."""
     import torch
     end_ids = model.generation_config.eos_token_id
     if end_ids is None:
         end_ids = tokenizer.eos_token_id
     if not isinstance(end_ids, (list, tuple)):
         end_ids = [end_ids]
-    end_ids = set(end_ids)
-    if tokenizer.pad_token_id is not None:
-        end_ids.add(tokenizer.pad_token_id)
     is_end = torch.zeros_like(comp, dtype=torch.bool)
     for e in end_ids:
         is_end |= comp == e
@@ -185,17 +196,10 @@ def generate_batch(model, tokenizer, prompts, args, template_used,
             pad_token_id=tokenizer.pad_token_id,
             repetition_penalty=1.0,  # Qwen ships 1.05 in generation_config
         )
-        # Base models on the ChatML fallback don't treat <|im_end|> as EOS
-        # and would otherwise generate to max_new_tokens on every rollout.
-        # stop_strings ends those sequences early (requires transformers
-        # >= 4.39; the matched string stays in the output — a few extra
-        # tokens in the scored completion, which is negligible).
-        if template_used == "chatml_fallback":
-            gen_kwargs.update(
-                stop_strings=["<|im_end|>", "<|im_start|>",
-                              "\nQuestion:", "\nProblem:"],
-                tokenizer=tokenizer,
-            )
+        # NOTE: no stop_strings — matches eval_entropy_gsm8k.py. Base models
+        # on the ChatML fallback have no EOS in-format and will usually run
+        # to max_new_tokens; that's fine, the distribution is still measured
+        # over the tokens actually sampled from the policy.
         if greedy and num_beams == 1:
             gen_kwargs.update(do_sample=False)
         elif num_beams > 1:
@@ -588,6 +592,10 @@ def _measure_config_key(model_path: str, args) -> str:
     cfg = {
         "task": "output_dist",
         "dataset": "openai/gsm8k:main:train",
+        # Prompt format is part of the measurement semantics; bumped when it
+        # changed from the verl "####" suffix to the system/\boxed{} prompt
+        # (eval_entropy_gsm8k.py format) so stale results aren't reused.
+        "prompt": "system_boxed",
         "model": model_path,
         "num_prompts": args.num_prompts,
         "num_samples": args.num_samples,
@@ -657,11 +665,15 @@ def main():
                     default=".output_dist_baseline_cache.json",
                     help="Where cached baseline results live "
                          "(default: .output_dist_baseline_cache.json)")
-    ap.add_argument("--num-prompts", dest="num_prompts", type=int, default=32,
-                    help="Number of GSM8K train prompts (default 32).")
-    ap.add_argument("--num-samples", dest="num_samples", type=int, default=16,
-                    help="Sampled rollouts per prompt; histogram pool = "
-                         "num_prompts * num_samples per model (default 16).")
+    ap.add_argument("--num-prompts", dest="num_prompts", type=int,
+                    default=128,
+                    help="Number of GSM8K train prompts (default 128, "
+                         "matching eval_entropy_gsm8k.py; seeded, so "
+                         "identical across all models).")
+    ap.add_argument("--num-samples", dest="num_samples", type=int, default=8,
+                    help="Sampled rollouts per prompt (default 8, matching "
+                         "the GRPO config / eval_entropy_gsm8k.py); "
+                         "histogram pool = num_prompts * num_samples.")
     ap.add_argument("--temperature", type=float, default=1.0,
                     help="Sampling temperature (default 1.0 — the GRPO "
                          "rollout setting; also used to temper the scored "

@@ -91,6 +91,17 @@ parser.add_argument(
     default="flash_attention_2",
     help="Attention implementation",
 )
+parser.add_argument(
+    "--switch",
+    default=False,
+    action="store_true",
+    help="Enable scheduled SR training"
+)
+parser.add_argument(
+    "--switch_step",
+    default=400,
+    help="Step at which to switch epsilon params and reward"
+)
 args = parser.parse_args()
 
 

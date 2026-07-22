@@ -53,16 +53,32 @@ class GRPORunner():
 
         config = self.handle_grpo_config_args(args)
         self.print_config(config)
+        print(f"scheduling: {args.switch}")
         grpo_args = GRPOConfig(**config)
 
-        trainer = GRPOTrainer(
-            model=model,
-            processing_class=tokenizer,
-            reward_funcs=reward_funcs,
-            args=grpo_args,
-            train_dataset=ds,
-        )
-        trainer.train()
+        if args.switch:
+            from scheduled_grpo_trainer import ScheduledGRPOTrainer
+            trainer = ScheduledGRPOTrainer.with_switch(
+                model=model,
+                args=grpo_args,
+                reward_funcs=reward_funcs,      # used until the switch
+                train_dataset=ds,
+                switch_step=args.switch_step,
+                new_epsilon=0.2,                  # -> epsilon_low
+                new_epsilon_high=0.28,             # -> epsilon_high
+                new_reward_funcs=get_reward_funcs("ground_truth"),  # callable or list
+            )
+            trainer.train()
+
+        else:
+            trainer = GRPOTrainer(
+                model=model,
+                processing_class=tokenizer,
+                reward_funcs=reward_funcs,
+                args=grpo_args,
+                train_dataset=ds,
+            )
+            trainer.train()
 
 
     # DeepScaleR 
@@ -108,6 +124,7 @@ class GRPORunner():
         if getattr(args, "lr", None) is not None:
             config["learning_rate"] = float(args.lr)
 
+        # flamingo specific
         if args.model == "meta-llama/Llama-3.2-1B-Instruct":
             config["vllm_gpu_memory_utilization"] = 0.40
 
