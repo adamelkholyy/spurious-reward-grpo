@@ -1,0 +1,10 @@
+__pycache__/
+venv/
+outputs/
+runners/__pycache__/
+logs/
+results/
+.gitconfig
+*.json
+*.sh
+settings.py
