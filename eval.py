@@ -476,7 +476,7 @@ def main():
                          "(0 = auto: min(8, cpu_count); 1 = in-process).")
     ap.add_argument("--max-model-len", dest="max_model_len", type=int, default=4096)
     ap.add_argument("--gpu-mem", dest="gpu_mem", type=float, default=0.9)
-    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--limit", type=int, default=50000)
     ap.add_argument("--out", default=None,
                     help="Persistent results file. Models already evaluated "
                          "under the same config are skipped and reused; new "
