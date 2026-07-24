@@ -93,6 +93,12 @@ RESULTS_DIR = "results"
 DIST_METRICS = ["avg_logprob", "logprob_per_char", "mean_entropy",
                 "num_tokens"]
 
+DISABLED_FILE = "results/.disabled_models.json"
+
+disabled = set()
+if os.path.exists(DISABLED_FILE):
+    with open(DISABLED_FILE) as f:
+        disabled = set(json.load(f))
 
 # ---------------------------------------------------------------------------
 # Prompts — GSM8K *train* split, formatted IDENTICALLY to
@@ -551,6 +557,16 @@ def discover_models(outputs_dir: str, all_checkpoints: bool = False):
         if not os.path.isdir(run_dir):
             continue
         label = re.sub(r"-\d{8,}$", "", name)
+        if _ACTIVE_DATASET != "gsm8k":
+            alias = _ACTIVE_DATASET
+            if _ACTIVE_DATASET == "countdown4":
+                alias = "countdown"
+            if alias not in label and alias not in name:
+                print(f"{label} does not match dataset {alias}, skipping")
+                continue
+        if label in disabled or name in disabled:
+            print(f"{label} is disabled, skipping")
+            continue
         if _is_model_dir(run_dir):
             pairs.append((label, run_dir))
             continue
@@ -719,6 +735,9 @@ def main():
     ap.add_argument("--total-models", dest="total_models", default="?",
                     help=argparse.SUPPRESS)
     args = ap.parse_args()
+
+    global _ACTIVE_DATASET
+    _ACTIVE_DATASET = args.dataset
 
     # Worker mode: a single model path was injected by the driver.
     if args.worker_out:

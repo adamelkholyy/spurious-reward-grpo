@@ -60,6 +60,13 @@ _ACTIVE_DATASET = "gsm8k"
 def _task():
     return get_task(_ACTIVE_DATASET)
 
+DISABLED_FILE = "results/.disabled_models.json"
+
+disabled = set()
+if os.path.exists(DISABLED_FILE):
+    with open(DISABLED_FILE) as f:
+        disabled = set(json.load(f))
+
 
 # ---------------------------------------------------------------------------
 # Prompt — route through the model's chat template, matching the Spurious
@@ -149,7 +156,11 @@ def run_one(args):
     _ACTIVE_DATASET = args.dataset
     task = _task()
 
-    problems, golds = task.load_eval(split="test", limit=args.limit)
+    if _ACTIVE_DATASET == "countdown4":
+        problems, golds = task.load_eval(split="train", limit=args.limit)
+    else:
+        problems, golds = task.load_eval(split="test", limit=args.limit)
+
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     prompts, template_used = build_prompts(problems, tokenizer)
     if template_used == "chatml_fallback":
@@ -327,6 +338,16 @@ def discover_models(outputs_dir: str, all_checkpoints: bool = False):
         if not os.path.isdir(run_dir):
             continue
         label = re.sub(r"-\d{8,}$", "", name)
+        if _ACTIVE_DATASET != "gsm8k":
+            alias = _ACTIVE_DATASET
+            if _ACTIVE_DATASET == "countdown4":
+                alias = "countdown"
+            if alias not in label and alias not in name:
+                print(f"{label} does not match dataset {alias}, skipping")
+                continue
+        if label in disabled or name in disabled:
+            print(f"{label} is disabled, skipping")
+            continue
         if _is_model_dir(run_dir):
             pairs.append((label, run_dir))
             continue
@@ -472,6 +493,9 @@ def main():
     ap.add_argument("--model-idx", dest="model_idx", default="?", help=argparse.SUPPRESS)
     ap.add_argument("--total-models", dest="total_models", default="?", help=argparse.SUPPRESS)
     args = ap.parse_args()
+
+    global _ACTIVE_DATASET
+    _ACTIVE_DATASET = args.dataset
 
     # Worker mode: a single model path was injected by the driver.
     if args.worker_out:

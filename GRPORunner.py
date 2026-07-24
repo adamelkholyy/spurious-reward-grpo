@@ -67,6 +67,10 @@ class GRPORunner():
                 config["gradient_accumulation_steps"] = 16
                 print("Qwen-3B, decreasing memory usage")
 
+        if getattr(args, "dataset", "x") == "wordle":
+            config["vllm_gpu_memory_utilization"] = 0.22
+
+
         if getattr(args, "eps_low", None) is not None:
             config["epsilon"] = float(args.eps_low)
         if getattr(args, "eps_high", None) is not None:

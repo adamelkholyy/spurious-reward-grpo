@@ -86,6 +86,13 @@ from tasks import available_tasks, get_task  # noqa: E402
 
 _ACTIVE_DATASET = "gsm8k"
 
+DISABLED_FILE = "results/.disabled_models.json"
+
+disabled = set()
+if os.path.exists(DISABLED_FILE):
+    with open(DISABLED_FILE) as f:
+        disabled = set(json.load(f))
+
 
 def _task():
     return get_task(_ACTIVE_DATASET)
@@ -403,6 +410,8 @@ def discover_models(outputs_dir: str, all_checkpoints: bool = False):
         if not os.path.isdir(run_dir):
             continue
         label = re.sub(r"-\d{8,}$", "", name)
+        if label in disabled or name in disabled:
+            continue
         if _is_model_dir(run_dir):
             pairs.append((label, run_dir))
             continue

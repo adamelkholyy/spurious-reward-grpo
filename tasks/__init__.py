@@ -16,7 +16,7 @@ from .base import DatasetSpec
 from .registry import available_tasks, get_task, register_task
 
 # Import concrete tasks so they register themselves on `import tasks`.
-from . import gsm8k, deepscaler, wordle  # noqa: E402,F401
+from . import gsm8k, deepscaler, wordle, countdown4  # noqa: E402,F401
 
 __all__ = [
     "DatasetSpec",
