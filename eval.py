@@ -143,6 +143,17 @@ def resolve_pass_ks(n: int, requested):
     return sorted(set((requested or []) + [n]))
 
 
+def _effective_limit(task, args) -> int:
+    """Problem cap for this eval. Explicit --limit always wins. Otherwise:
+    tasks with a real held-out split get the large default; tasks that eval
+    on their own training split (train-only hubs: countdown4, deepscaler,
+    dapo, ...) are capped at 500 so a proxy eval can't silently become a
+    17k/500k-problem run."""
+    if args.limit is not None:
+        return args.limit
+    return 500 if task.eval_split == task.train_split else 50000
+
+
 # ---------------------------------------------------------------------------
 # Worker: evaluate ONE model in this process, write JSON, exit.
 # ---------------------------------------------------------------------------
@@ -156,10 +167,10 @@ def run_one(args):
     _ACTIVE_DATASET = args.dataset
     task = _task()
 
-    if _ACTIVE_DATASET == "countdown4":
-        problems, golds = task.load_eval(split="train", limit=args.limit)
-    else:
-        problems, golds = task.load_eval(split="test", limit=args.limit)
+    # The task owns its eval split (tasks/<name>.py: eval_split); passing
+    # split=None defers to it. Hardcoding "test" here crashed every task
+    # whose hub ships a train split only (deepscaler, dapo, aime2024).
+    problems, golds = task.load_eval(split=None, limit=_effective_limit(task, args))
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     prompts, template_used = build_prompts(problems, tokenizer)
@@ -328,7 +339,7 @@ def _checkpoints(run_dir: str):
     return sorted(ckpts)
 
 
-def discover_models(outputs_dir: str, all_checkpoints: bool = False):
+def discover_models(outputs_dir: str):
     if not os.path.isdir(outputs_dir):
         sys.exit(f"No such directory: {outputs_dir}")
 
@@ -339,9 +350,11 @@ def discover_models(outputs_dir: str, all_checkpoints: bool = False):
             continue
         label = re.sub(r"-\d{8,}$", "", name)
         if _ACTIVE_DATASET != "gsm8k":
-            alias = _ACTIVE_DATASET
-            if _ACTIVE_DATASET == "countdown4":
-                alias = "countdown"
+            # Runs are matched to datasets by label substring. Eval-only
+            # tasks map to the dataset they were trained on (aime2024 is the
+            # benchmark for dapo-trained runs).
+            alias = {"countdown4": "countdown", "aime2024": "dapo"}.get(
+                _ACTIVE_DATASET, _ACTIVE_DATASET)
             if alias not in label and alias not in name:
                 print(f"{label} does not match dataset {alias}, skipping")
                 continue
@@ -354,10 +367,12 @@ def discover_models(outputs_dir: str, all_checkpoints: bool = False):
         ckpts = _checkpoints(run_dir)
         if not ckpts:
             continue
-        if all_checkpoints:
-            pairs.extend((f"{label}@{step}", path) for step, path in ckpts)
+        if len(ckpts) > 1:
+            # Multiple checkpoints -> evaluate ALL of them, disambiguated by
+            # training step so the table shows the trajectory.
+            pairs.extend((f"{label}_chk={step}", path) for step, path in ckpts)
         else:
-            pairs.append((label, ckpts[-1][1]))
+            pairs.append((label, ckpts[0][1]))
 
     seen, uniq = {}, []
     for label, path in pairs:
@@ -390,14 +405,18 @@ def get_baseline_key(label):
 
 
 def _baseline_cache_key(model_path: str, args) -> str:
+    task = get_task(args.dataset)
     cfg = {
-        "dataset": get_task(args.dataset).eval_dataset_id("test"),
+        # eval_dataset_id(None) records the split the task ACTUALLY evals on
+        # (hardcoding "test" here mislabelled train-only tasks like
+        # countdown4, and _effective_limit keys the implicit caps too).
+        "dataset": task.eval_dataset_id(),
         "model": model_path,
         "n": args.n,
         "temperature": args.temperature,
         "max_tokens": args.max_tokens,
         "max_model_len": args.max_model_len,
-        "limit": args.limit,
+        "limit": _effective_limit(task, args),
         "pass_k": sorted(args.pass_k) if args.pass_k else [],
     }
     return json.dumps(cfg, sort_keys=True)
@@ -446,10 +465,6 @@ def main():
     ap.add_argument("--outputs-dir", dest="outputs_dir", default="outputs",
                     help="Directory scanned when --models is omitted "
                          "(default: outputs/)")
-    ap.add_argument("--all-checkpoints", dest="all_checkpoints",
-                    action="store_true",
-                    help="Discovery mode: eval EVERY checkpoint per run "
-                         "instead of just the latest")
     ap.add_argument("--skip-baselines", action="store_true",
                     help="Do not automatically inject and evaluate base models.")
     ap.add_argument("--refresh-baselines", dest="refresh_baselines",
@@ -476,7 +491,10 @@ def main():
                          "(0 = auto: min(8, cpu_count); 1 = in-process).")
     ap.add_argument("--max-model-len", dest="max_model_len", type=int, default=4096)
     ap.add_argument("--gpu-mem", dest="gpu_mem", type=float, default=0.9)
-    ap.add_argument("--limit", type=int, default=50000)
+    ap.add_argument("--limit", type=int, default=None,
+                    help="Max problems to evaluate. Default: all (50000) for "
+                         "held-out eval splits; 500 for tasks that eval on "
+                         "their own training split.")
     ap.add_argument("--out", default=None,
                     help="Persistent results file. Models already evaluated "
                          "under the same config are skipped and reused; new "
@@ -537,7 +555,7 @@ def main():
                     f"'{label}_grpo={path}'.")
             pairs.append((label, path))
     else:
-        pairs = discover_models(args.outputs_dir, args.all_checkpoints)
+        pairs = discover_models(args.outputs_dir)
         # Discovered run dirs might coincidentally be named like a baseline;
         # rename rather than error since the user didn't type these.
         renamed = []
@@ -631,9 +649,10 @@ def main():
                 "--max-tokens", str(args.max_tokens),
                 "--max-model-len", str(args.max_model_len),
                 "--gpu-mem", str(args.gpu_mem),
-                "--limit", str(args.limit),
                 "--grade-workers", str(args.grade_workers),
             ]
+            if args.limit is not None:
+                cmd += ["--limit", str(args.limit)]
             if args.pass_k:
                 cmd += ["--pass-k"] + [str(k) for k in args.pass_k]
             print(f"\n=== [{pos}] Evaluating '{label}'  ({path}) ===", flush=True)
@@ -670,7 +689,7 @@ def main():
 
     width = 55 + 10 + 12 + 12 * len(k_cols) + 12 + 12
     print("\n" + "=" * width)
-    print(f"GSM8K results   (n={args.n}, T={args.temperature}, "
+    print(f"{args.dataset} results   (n={args.n}, T={args.temperature}, "
           f"{results[0]['n_problems']} problems)")
     print("p@k(unb) columns use the unbiased estimator (Chen et al. 2021); "
           "at k=n it coincides exactly with the empirical pass@n.")

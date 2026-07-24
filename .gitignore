@@ -8,3 +8,4 @@ results/
 *.json
 *.sh
 settings.py
+tasks/__pycache__/

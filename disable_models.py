@@ -3,7 +3,7 @@ import json
 
 OUTPUTS_DIR = "./outputs"
 RESULTS_DIR = "./results"
-DISABLED_FILE = ".disabled_models.json"
+DISABLED_FILE = "./results/disabled_models.json"
 
 RESULT_FILES = [
     "results_entropy_gsm8k.json",

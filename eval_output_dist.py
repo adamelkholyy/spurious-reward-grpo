@@ -559,8 +559,8 @@ def discover_models(outputs_dir: str, all_checkpoints: bool = False):
         label = re.sub(r"-\d{8,}$", "", name)
         if _ACTIVE_DATASET != "gsm8k":
             alias = _ACTIVE_DATASET
-            if _ACTIVE_DATASET == "countdown4":
-                alias = "countdown"
+            if _ACTIVE_DATASET == "countdown4": alias = "countdown"
+            if _ACTIVE_DATASET == "aime2024": alias = "dapo"
             if alias not in label and alias not in name:
                 print(f"{label} does not match dataset {alias}, skipping")
                 continue

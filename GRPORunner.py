@@ -20,9 +20,12 @@ class GRPORunner():
         reward_funcs = get_reward_funcs(reward_name)
 
         config = self.handle_grpo_config_args(args)
-        self.print_config(config)
-        print(f"Scheduling switches at step: {args.switch_step}")
         grpo_args = GRPOConfig(**config)
+
+        self.print_config(config)
+        print(f"Scheduling switches at step {args.switch_step}" if args.switch_step else "Scheduling OFF")
+        print(f"Running on {'HPC' if HPC else 'FLAMINGO'}")
+        print("="*100)
 
         if args.switch_step: # TODO add multi-scheduling to args
             trainer = ScheduledGRPOTrainer.with_switch(
@@ -35,15 +38,14 @@ class GRPORunner():
                 new_epsilon_high=getattr(args, "new_eps_high", 0.28),           
                 new_reward_funcs=get_reward_funcs("ground_truth"),  # callable or list
             )
-            trainer.train()
-
-        trainer = GRPOTrainer(
-            model=model,
-            processing_class=tokenizer,
-            reward_funcs=reward_funcs,
-            args=grpo_args,
-            train_dataset=ds,
-        )
+        else:
+            trainer = GRPOTrainer(
+                model=model,
+                processing_class=tokenizer,
+                reward_funcs=reward_funcs,
+                args=grpo_args,
+                train_dataset=ds,
+            )
         trainer.train()
 
     @staticmethod
@@ -54,22 +56,28 @@ class GRPORunner():
         if HPC: # CSD3 specific settings
             if "Qwen" in  args.model:
                 config["vllm_gpu_memory_utilization"] = 0.22
-                config["per_device_train_batch_size"] = 8 
-                config["gradient_accumulation_steps"] = 8  
-                print("Qwen, lowering memory usage")
+                print("Qwen, decreasing memory usage")
         else: # Flamingo specific settings 
             if "0.5B" in args.model:
                 config["vllm_gpu_memory_utilization"] = 0.5
                 print("Qwen-0.5B, increasing memory usage")
-            if "3B" in args.model:
-                config["vllm_gpu_memory_utilization"] = 0.275 # could be increased
-                config["per_device_train_batch_size"] = 4 
-                config["gradient_accumulation_steps"] = 16
-                print("Qwen-3B, decreasing memory usage")
+
+        if "3B" in args.model:
+            config["vllm_gpu_memory_utilization"] = 0.275 # could be increased
+            config["per_device_train_batch_size"] = 4 
+            config["gradient_accumulation_steps"] = 16
+            print("Qwen-3B, decreasing memory usage")
 
         if getattr(args, "dataset", "x") == "wordle":
             config["vllm_gpu_memory_utilization"] = 0.22
 
+        if getattr(args, "dataset", "x") == "mbpp":
+            config["vllm_gpu_memory_utilization"] = 0.5
+
+        if getattr(args, "dataset", "x") == "dapo":
+            config["vllm_gpu_memory_utilization"] = 0.5
+            config["per_device_train_batch_size"] = 4 
+            config["gradient_accumulation_steps"] = 16
 
         if getattr(args, "eps_low", None) is not None:
             config["epsilon"] = float(args.eps_low)

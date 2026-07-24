@@ -24,7 +24,8 @@ class DeepScaleRTask(DatasetSpec):
     hf_path = "agentica-org/DeepScaleR-Preview-Dataset"
     hf_config = None
     train_split = "train"
-    eval_split = "train"  # dataset ships train only
+    eval_split = "train"   # dataset ships train only...
+    holdout_n = 500        # ...so hold out 500 rows: eval never trained on
 
     default_reward = "ground_truth"
     allowed_rewards = None

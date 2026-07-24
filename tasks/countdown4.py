@@ -46,16 +46,29 @@ _ALLOWED_RE = re.compile(r"^[\d+\-*/().\s]+$")
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 
 
+# Unicode arithmetic + wrapper junk chat models emit around equations.
+_NORMALIZE = str.maketrans({"−": "-", "–": "-", "×": "*", "⋅": "*", "÷": "/",
+                            "$": None, "`": None})
+
+
 def extract_equation(text: str) -> Optional[str]:
     """Equation inside the LAST ``<answer>...</answer>`` block, or ``None``.
 
-    If the model wrote ``<answer> (1 + 2) / 3 = 1 </answer>``, keep the
-    left-hand side so a trailing ``= <result>`` doesn't fail the char check.
+    Unicode operators (``−``/``×``/``÷``) and ``$``/backtick wrappers are
+    normalised away. For ``=``: keep the left-hand side so a trailing
+    ``= <result>`` doesn't fail the char check — unless the LHS is a single
+    bare number (the model wrote ``65 = 55 + ...``), in which case grade the
+    right-hand side.
     """
     matches = _ANSWER_RE.findall(text)
     if not matches:
         return None
-    return matches[-1].split("=")[0].strip() or None
+    block = matches[-1].translate(_NORMALIZE)
+    lhs, _, rhs = block.partition("=")
+    lhs, rhs = lhs.strip(), rhs.split("=")[0].strip()
+    if rhs and re.fullmatch(r"\d+(?:\.\d+)?", lhs):
+        return rhs or None
+    return lhs or None
 
 
 def _uses_exactly(equation: str, nums: List[int]) -> bool:
@@ -65,16 +78,27 @@ def _uses_exactly(equation: str, nums: List[int]) -> bool:
     itself off as a use of 3 and 5.
     """
     literals = _NUMBER_RE.findall(equation)
-    try:
-        used = sorted(int(x) for x in literals)
-    except ValueError:  # a non-integer literal like '3.5'
-        return False
-    return used == sorted(int(n) for n in nums)
+    used = []
+    for x in literals:
+        f = float(x)
+        if not f.is_integer():  # a genuine decimal like '3.5'
+            return False
+        used.append(int(f))
+    return sorted(used) == sorted(int(n) for n in nums)
 
 
 def _safe_eval(equation: str) -> Optional[float]:
-    """Evaluate a vetted arithmetic expression; ``None`` on any failure."""
-    if not _ALLOWED_RE.fullmatch(equation) or "**" in equation:
+    """Evaluate a vetted arithmetic expression; ``None`` on any failure.
+
+    ``//`` is rejected alongside ``**``: floor division passes the character
+    filter but lets otherwise-unreachable targets be hit (e.g. 458 // 7 = 65),
+    which GRPO will happily discover and exploit. Whitespace is collapsed so a
+    line-wrapped equation isn't a Python SyntaxError.
+    """
+    if not _ALLOWED_RE.fullmatch(equation):
+        return None
+    equation = " ".join(equation.split())
+    if "**" in equation or "//" in equation:
         return None
     try:
         return float(eval(equation, {"__builtins__": None}, {}))
@@ -132,7 +156,8 @@ class Countdown4Task(DatasetSpec):
     hf_path = "Jiayi-Pan/Countdown-Tasks-4"
     hf_config = None
     train_split = "train"
-    eval_split = "train"  # dataset ships train only (cf. deepscaler)
+    eval_split = "train"   # dataset ships train only...
+    holdout_n = 500        # ...so hold out 500 rows: eval never trained on
 
     default_reward = "countdown"
     allowed_rewards = ("countdown", "random")

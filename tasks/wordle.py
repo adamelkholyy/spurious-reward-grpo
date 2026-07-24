@@ -175,7 +175,9 @@ def closeness(colors: Sequence[str]) -> int:
 
 
 # --- parsing ---------------------------------------------------------------
-_GUESS_RE = re.compile(r"guess:\s*([a-zA-Z]+)", re.IGNORECASE)
+# Tolerates 'guess :', and markdown/quote junk between the tag and the word
+# ('**guess:** crane', 'guess: "crane"', '### Guess:\ncrane', ...).
+_GUESS_RE = re.compile(r"""guess\s*:\s*[*_`"'#\s]*([a-zA-Z]+)""", re.IGNORECASE)
 _FB_LINE_RE = re.compile(
     r"guess_feedback:\s*((?:[a-zA-Z]<(?:green|yellow|red)>\s*){%d})" % WORD_LEN,
     re.IGNORECASE,
@@ -184,11 +186,24 @@ _FB_TOK_RE = re.compile(r"([a-zA-Z])<(green|yellow|red)>", re.IGNORECASE)
 
 
 def parse_guess(text: str) -> Optional[str]:
-    """Extract the model's guessed word (first 'guess:' occurrence)."""
-    m = _GUESS_RE.search(text)
-    if not m:
-        return None
-    return m.group(1).lower()
+    """Extract the model's guessed word (first 'guess:' occurrence).
+
+    A capture that is immediately followed by ':' is another tag label, not a
+    word (e.g. in 'here is my guess:\\n\\nguess: crane' the first match would
+    capture the literal token 'guess' — a 5-letter valid word, so it would
+    silently pass every format gate and grade wrong). Skip such captures and
+    rescan from inside the match so the inner 'guess:' tag is still found.
+    """
+    pos = 0
+    while True:
+        m = _GUESS_RE.search(text, pos)
+        if not m:
+            return None
+        end = m.end(1)
+        if end < len(text) and text[end] == ":":
+            pos = m.start() + 1  # captured a following tag; rescan past it
+            continue
+        return m.group(1).lower()
 
 
 def parse_feedback_history(prompt_text: str) -> List[List[Tuple[str, str]]]:

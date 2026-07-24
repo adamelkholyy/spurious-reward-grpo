@@ -55,6 +55,37 @@ class DatasetSpec:
     #: Instruction appended to the question at *training* time. May be ``None``.
     train_instruction: Optional[str] = None
 
+    # --- held-out eval for train-only hubs ---------------------------------
+    #: If > 0, carve this many rows out of the training data to serve as the
+    #: eval set (for datasets whose hub ships a train split only). Applied by
+    #: the default ``build_train`` / ``_load_eval_split``; tasks with custom
+    #: loaders apply :meth:`_split_holdout` themselves.
+    holdout_n: int = 0
+    #: Seed for the carve-out permutation. ``None`` => no shuffle: the
+    #: holdout is literally the first ``holdout_n`` rows (only safe if the
+    #: hub ordering is known to be random).
+    holdout_seed: Optional[int] = 0
+
+    def _split_holdout(self, ds) -> Tuple[Any, Any]:
+        """``(train_ds, eval_ds)`` — deterministic disjoint carve-out.
+
+        Selection is a seeded permutation (or a plain prefix when
+        ``holdout_seed`` is ``None``); both halves are re-sorted by original
+        index so row order stays stable and cache-friendly.
+        """
+        import random
+
+        idx = list(range(len(ds)))
+        if self.holdout_seed is not None:
+            random.Random(self.holdout_seed).shuffle(idx)
+        k = min(self.holdout_n, len(ds))
+        held, rest = sorted(idx[:k]), sorted(idx[k:])
+        return ds.select(rest), ds.select(held)
+
+    def _holdout_active(self, split: Optional[str]) -> bool:
+        """Holdout applies when evaluating the (train-only) training split."""
+        return self.holdout_n > 0 and (split or self.eval_split) == self.train_split
+
     # =======================================================================
     # Training
     # =======================================================================
@@ -75,6 +106,8 @@ class DatasetSpec:
         from datasets import load_dataset
 
         ds = load_dataset(self.hf_path, self.hf_config, split=self.train_split)
+        if self.holdout_n > 0:
+            ds, _ = self._split_holdout(ds)  # never train on the eval rows
         return ds.map(
             lambda x: self.format_train_example(x, tokenizer),
             remove_columns=ds.column_names,
@@ -136,9 +169,12 @@ class DatasetSpec:
     def _load_eval_split(self, split: Optional[str] = None):
         from datasets import load_dataset
 
-        return load_dataset(
+        ds = load_dataset(
             self.hf_path, self.hf_config, split=split or self.eval_split
         )
+        if self._holdout_active(split):
+            _, ds = self._split_holdout(ds)
+        return ds
 
     #: Column holding the natural-language problem/question.
     question_column: str = "question"
@@ -218,6 +254,16 @@ class DatasetSpec:
             )
 
     def eval_dataset_id(self, split: Optional[str] = None) -> str:
-        """Human-readable id recorded in eval JSON (e.g. 'openai/gsm8k:main:test')."""
+        """Human-readable id recorded in eval JSON (e.g. 'openai/gsm8k:main:test').
+
+        Includes the holdout config when active, so eval results and baseline
+        caches keyed on this id can never silently mix the held-out eval with
+        the old eval-on-train numbers.
+        """
         cfg = f":{self.hf_config}" if self.hf_config else ""
-        return f"{self.hf_path}{cfg}:{split or self.eval_split}"
+        hold = (
+            f":heldout{self.holdout_n}s{self.holdout_seed}"
+            if self._holdout_active(split)
+            else ""
+        )
+        return f"{self.hf_path}{cfg}:{split or self.eval_split}{hold}"
