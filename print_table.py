@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import numpy as np 
 
 BASELINE_FAMILIES = ("qwen", "llama", "olmo")
 
@@ -191,6 +192,32 @@ def _print_latex(sections, cells, k_cols, n, caption):
     print(r"\caption{" + _tex(caption.strip()) + "}")
     print(r"\end{table}")
 
+def load_results(path="results_output_dist.json"):
+    """Load the results file and return a {label: entry} dict."""
+    with open(path) as f:
+        results = json.load(f)
+    return {e["label"]: e for e in results}
+
+def print_output_dist_table(results_path="results/results_output_dist.json"):
+    with open(results_path) as f:
+        results = json.load(f)
+
+
+    print(f"{'model':<65}{'mean entropy':>15}{'std':>15}")
+    print("-" * 80)
+
+    print(len(results))
+
+    for r in results:
+        e = r["label"]
+        try:        
+            mean =  r["stats"]['mean_entropy']["mean"] 
+            vari = r["stats"]['mean_entropy']["std"] 
+            print(f"{e:<65}{mean:>15.4f}{vari:>15.4f}")
+
+        except:
+            pass 
+
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
@@ -204,10 +231,19 @@ if __name__ == "__main__":
     p.add_argument("--no-skip", action="store_true",
                    help="keep labels containing "
                         + "/".join(DEFAULT_SKIP_SUBSTRINGS))
+    p.add_argument("--out_dist", action="store_true")
     a = p.parse_args()
-    print_gsm8k_table(a.results_path,
-                      baseline_cache_path=a.baseline_cache,
-                      latex=a.latex,
-                      sort_by_model=a.sort_by_model,
-                      skip_substrings=() if a.no_skip
-                      else DEFAULT_SKIP_SUBSTRINGS)
+
+
+    if a.out_dist:
+        print_output_dist_table()
+    else:
+        print_gsm8k_table(a.results_path,
+                        baseline_cache_path=a.baseline_cache,
+                        latex=a.latex,
+                        sort_by_model=a.sort_by_model,
+                        skip_substrings=() if a.no_skip
+                        else DEFAULT_SKIP_SUBSTRINGS)
+
+
+    # print_output_dist_table()

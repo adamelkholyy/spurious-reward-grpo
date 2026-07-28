@@ -36,7 +36,7 @@ class GRPORunner():
                 switch_step=args.switch_step,
                 new_epsilon=getattr(args, "new_eps_low", 0.20),                
                 new_epsilon_high=getattr(args, "new_eps_high", 0.28),           
-                new_reward_funcs=get_reward_funcs("ground_truth"),  # callable or list
+                new_reward_funcs=get_reward_funcs(getattr(args, "new_reward", "ground_truth")),  # callable or list
             )
         else:
             trainer = GRPOTrainer(
@@ -69,13 +69,18 @@ class GRPORunner():
             print("Qwen-3B, decreasing memory usage")
 
         if getattr(args, "dataset", "x") == "wordle":
-            config["vllm_gpu_memory_utilization"] = 0.22
+            config["vllm_gpu_memory_utilization"] = 0.20 if HPC else 0.22
 
         if getattr(args, "dataset", "x") == "mbpp":
-            config["vllm_gpu_memory_utilization"] = 0.5
+            if "Qwen" in args.model:
+                config["vllm_gpu_memory_utilization"] = 0.25
+            elif HPC:
+                config["vllm_gpu_memory_utilization"] = 0.35
+            else:
+                config["vllm_gpu_memory_utilization"] = 0.40
 
         if getattr(args, "dataset", "x") == "dapo":
-            config["vllm_gpu_memory_utilization"] = 0.5
+            config["vllm_gpu_memory_utilization"] = 0.35 if HPC else 0.4
             config["per_device_train_batch_size"] = 4 
             config["gradient_accumulation_steps"] = 16
 

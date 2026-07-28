@@ -36,7 +36,9 @@ BASE_MODELS = {
     "qwen": "Qwen/Qwen2.5-1.5B-Instruct",
     "llama": "meta-llama/Llama-3.2-1B-Instruct",
     "olmo": "allenai/OLMo-2-0425-1B-Instruct",
-}
+    "qwen-small": "Qwen/Qwen2.5-0.5B-Instruct",
+    "qwen3b": "Qwen/Qwen2.5-3B-Instruct"
+} 
 
 # All results / caches live here. Default filenames are derived from
 # --dataset (e.g. gsm8k -> results/results_gsm8k.json +
@@ -358,6 +360,10 @@ def discover_models(outputs_dir: str):
             if alias not in label and alias not in name:
                 print(f"{label} does not match dataset {alias}, skipping")
                 continue
+        else:
+            if "countdown" in label or "dapo" in label or "mbpp" in label or "wordle" in label:
+                print(f"{label} does not match gsm8k, skipping")
+                continue
         if label in disabled or name in disabled:
             print(f"{label} is disabled, skipping")
             continue
@@ -400,6 +406,10 @@ def get_baseline_key(label):
     if "olmo" in lbl:
         return "olmo"
     if "qwen" in lbl:
+        if "small" in lbl:
+            return "qwen-small"
+        elif "3b" in lbl:
+            return "qwen3b" 
         return "qwen"
     return None
 
