@@ -4,6 +4,7 @@ from rewards import get_reward_funcs
 from settings import INF_EPS_HIGH, GRPO_CONFIG, HPC
 from tasks import get_task
 from ScheduledGRPOTrainer import ScheduledGRPOTrainer
+from EntropyThermostatGRPOTrainer import EntropyThermostatGRPOTrainer
 
 
 class GRPORunner():
@@ -23,11 +24,45 @@ class GRPORunner():
         grpo_args = GRPOConfig(**config)
 
         self.print_config(config)
-        print(f"Scheduling switches at step {args.switch_step}" if args.switch_step else "Scheduling OFF")
+        if getattr(args, "entropy_thermostat", False):
+            print(
+                f"Entropy thermostat ON: target={args.thermostat_target}, "
+                f"deadband={args.thermostat_deadband}"
+            )
+        else:
+            print(f"Scheduling switches at step {args.switch_step}" if args.switch_step else "Scheduling OFF")
         print(f"Running on {'HPC' if HPC else 'FLAMINGO'}")
         print("="*100)
 
-        if args.switch_step: # TODO add multi-scheduling to args
+        if getattr(args, "entropy_thermostat", False):
+            if args.switch_step:
+                raise ValueError("--entropy_thermostat and --switch_step are mutually exclusive")
+            if args.thermostat_target is None:
+                raise ValueError("--entropy_thermostat requires --thermostat_target")
+            if reward_name not in {"random", "random_p03", "random_p07", "gaussian"}:
+                raise ValueError(
+                    "The SR entropy thermostat requires a reward-independent signal: "
+                    "use --reward random (or random_p03/random_p07/gaussian)."
+                )
+
+            trainer = EntropyThermostatGRPOTrainer(
+                model=model,
+                processing_class=tokenizer,
+                args=grpo_args,
+                reward_funcs=reward_funcs,
+                train_dataset=ds,
+                thermostat={
+                    "target": float(args.thermostat_target),
+                    "deadband": float(args.thermostat_deadband),
+                    "ema_alpha": float(args.thermostat_ema_alpha),
+                    "control_interval": int(args.thermostat_interval),
+                    "up_epsilon_low": float(args.thermostat_up_eps_low),
+                    "up_epsilon_high": self._parse_epsilon_high(args.thermostat_up_eps_high),
+                    "down_epsilon_low": float(args.thermostat_down_eps_low),
+                    "down_epsilon_high": self._parse_epsilon_high(args.thermostat_down_eps_high),
+                },
+            )
+        elif args.switch_step: # TODO add multi-scheduling to args
             trainer = ScheduledGRPOTrainer.with_switch(
                 model=model,
                 args=grpo_args,
@@ -47,6 +82,10 @@ class GRPORunner():
                 train_dataset=ds,
             )
         trainer.train()
+
+    @staticmethod
+    def _parse_epsilon_high(value):
+        return INF_EPS_HIGH if str(value).lower() in ("inf", "infinity") else float(value)
 
     @staticmethod
     def handle_grpo_config_args(args):
@@ -88,10 +127,7 @@ class GRPORunner():
             config["epsilon"] = float(args.eps_low)
         if getattr(args, "eps_high", None) is not None:
             eh = args.eps_high
-            config["epsilon_high"] = (
-                INF_EPS_HIGH if str(eh).lower() in ("inf", "infinity")
-                else float(eh)
-            )
+            config["epsilon_high"] = GRPORunner._parse_epsilon_high(eh)
         if getattr(args, "max_steps", None) is not None:
             config["max_steps"] = int(args.max_steps)
         if getattr(args, "seed", None) is not None:

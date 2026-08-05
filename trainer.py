@@ -109,6 +109,57 @@ parser.add_argument(
     default=0.28,
     help="Epsilon high after switch"
 )
+parser.add_argument(
+    "--entropy_thermostat",
+    action="store_true",
+    help="Enable closed-loop SR entropy control (mutually exclusive with --switch_step).",
+)
+parser.add_argument(
+    "--thermostat_target",
+    type=float,
+    default=None,
+    help="Target mean policy entropy in nats (required with --entropy_thermostat).",
+)
+parser.add_argument(
+    "--thermostat_deadband",
+    type=float,
+    default=0.05,
+    help="Half-width of the target entropy hysteresis band (default: 0.05 nats).",
+)
+parser.add_argument(
+    "--thermostat_ema_alpha",
+    type=float,
+    default=0.2,
+    help="EMA weight for new entropy observations; 1.0 disables smoothing (default: 0.2).",
+)
+parser.add_argument(
+    "--thermostat_interval",
+    type=int,
+    default=16,
+    help="Optimizer steps between control decisions (default: 16, one current rollout cycle).",
+)
+parser.add_argument(
+    "--thermostat_up_eps_low",
+    type=float,
+    default=0.05,
+    help="Clip-low epsilon used to push entropy upward (default: 0.05).",
+)
+parser.add_argument(
+    "--thermostat_up_eps_high",
+    default="inf",
+    help="Clip-high epsilon used to push entropy upward (default: inf, disabled).",
+)
+parser.add_argument(
+    "--thermostat_down_eps_low",
+    type=float,
+    default=1.0,
+    help="Clip-low epsilon used to push entropy downward (default: 1.0, disabled).",
+)
+parser.add_argument(
+    "--thermostat_down_eps_high",
+    default="0.10",
+    help="Clip-high epsilon used to push entropy downward (default: 0.10).",
+)
 args = parser.parse_args()
 
 
@@ -127,6 +178,11 @@ if __name__ == "__main__":
             "eps_high": args.eps_high,
             "max_steps": args.max_steps,
             "seed": args.seed,
+            "entropy_thermostat": args.entropy_thermostat,
+            "thermostat_target": args.thermostat_target,
+            "thermostat_deadband": args.thermostat_deadband,
+            "thermostat_ema_alpha": args.thermostat_ema_alpha,
+            "thermostat_interval": args.thermostat_interval,
         },
     )
 
@@ -151,4 +207,3 @@ if __name__ == "__main__":
     )
 
     post_trainer.run(model, tokenizer, args)
-
