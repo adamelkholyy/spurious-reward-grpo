@@ -341,7 +341,7 @@ def _checkpoints(run_dir: str):
     return sorted(ckpts)
 
 
-def discover_models(outputs_dir: str):
+def discover_models(outputs_dir: str, tag: str = None):
     if not os.path.isdir(outputs_dir):
         sys.exit(f"No such directory: {outputs_dir}")
 
@@ -351,6 +351,8 @@ def discover_models(outputs_dir: str):
         if not os.path.isdir(run_dir):
             continue
         label = re.sub(r"-\d{8,}$", "", name)
+        if tag is not None and tag not in name:
+            continue
         if _ACTIVE_DATASET != "gsm8k":
             # Runs are matched to datasets by label substring. Eval-only
             # tasks map to the dataset they were trained on (aime2024 is the
@@ -374,12 +376,18 @@ def discover_models(outputs_dir: str):
         if not ckpts:
             continue
         if len(ckpts) > 1:
-            # Multiple checkpoints -> evaluate ALL of them, disambiguated by
-            # training step so the table shows the trajectory.
-            pairs.extend((f"{label}_chk={step}", path) for step, path in ckpts)
+            if tag is not None:
+                # Tagged sweep: only the latest checkpoint (highest step,
+                # e.g. checkpoint-2400). ckpts is sorted numerically by step.
+                step, path = ckpts[-1]
+                pairs.append((f"{label}_chk={step}", path))
+            else:
+                # Multiple checkpoints -> evaluate ALL of them, disambiguated
+                # by training step so the table shows the trajectory.
+                pairs.extend((f"{label}_chk={step}", path)
+                            for step, path in ckpts)
         else:
             pairs.append((label, ckpts[0][1]))
-
     seen, uniq = {}, []
     for label, path in pairs:
         if label in seen:
@@ -520,6 +528,11 @@ def main():
     ap.add_argument("--label", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--model-idx", dest="model_idx", default="?", help=argparse.SUPPRESS)
     ap.add_argument("--total-models", dest="total_models", default="?", help=argparse.SUPPRESS)
+    ap.add_argument("--tag", default=None,
+                        help="Only evaluate discovered runs whose folder name "
+                            "contains this substring; multi-checkpoint runs "
+                            "contribute only their latest checkpoint. Applies "
+                            "to auto-discovery; ignored with --models.")
     args = ap.parse_args()
 
     global _ACTIVE_DATASET
@@ -529,6 +542,9 @@ def main():
     if args.worker_out:
         run_one(args)
         return
+
+    # if args.n == 256:
+    #     args.skip_baselines = True
 
     # Auto-match results/cache files to the dataset (unless overridden).
     if args.out is None:
@@ -565,8 +581,10 @@ def main():
                     f"'{label}_grpo={path}'.")
             pairs.append((label, path))
     else:
-        pairs = discover_models(args.outputs_dir)
-        # Discovered run dirs might coincidentally be named like a baseline;
+        pairs = discover_models(args.outputs_dir, tag=args.tag)
+        if args.tag and not pairs:
+            sys.exit(f"No runs in {args.outputs_dir} match tag "
+                     f"'{args.tag}'.")        # Discovered run dirs might coincidentally be named like a baseline;
         # rename rather than error since the user didn't type these.
         renamed = []
         for i, (label, path) in enumerate(pairs):

@@ -63,7 +63,7 @@ class GRPORunner():
                 print("Qwen-0.5B, increasing memory usage")
 
         if "3B" in args.model:
-            config["vllm_gpu_memory_utilization"] = 0.275 # could be increased
+            config["vllm_gpu_memory_utilization"] = 0.275 # TEMP CHANGE # could be increased
             config["per_device_train_batch_size"] = 4 
             config["gradient_accumulation_steps"] = 16
             print("Qwen-3B, decreasing memory usage")
