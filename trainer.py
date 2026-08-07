@@ -100,6 +100,11 @@ parser.add_argument(
     help="Step at which to switch epsilon params and reward"
 )
 parser.add_argument(
+    "--save_step",
+    default=None,
+    help="Step at which to switch to save checkpoints"
+)
+parser.add_argument(
     "--new_eps_low",
     default=0.20,
     help="Epsilon low after switch"
@@ -112,19 +117,25 @@ parser.add_argument(
 parser.add_argument(
     "--entropy_thermostat",
     action="store_true",
-    help="Enable closed-loop SR entropy control (mutually exclusive with --switch_step).",
+    help="Train on GT and inject SR entropy correction only when target bounds are violated.",
+)
+parser.add_argument(
+    "--thermostat_normal_reward",
+    choices=available_rewards(),
+    default=None,
+    help="Normal task reward used outside SR corrections; thermostat SR regions always use random.",
 )
 parser.add_argument(
     "--thermostat_target",
     type=float,
-    default=None,
-    help="Target mean policy entropy in nats (required with --entropy_thermostat).",
+    default=1.0,
+    help="Target raw train/entropy value (default: 1.0).",
 )
 parser.add_argument(
     "--thermostat_deadband",
     type=float,
-    default=0.05,
-    help="Half-width of the target entropy hysteresis band (default: 0.05 nats).",
+    default=0.4,
+    help="Half-width of the raw-entropy target band (default: 0.4 => H in [0.6, 1.4]).",
 )
 parser.add_argument(
     "--thermostat_ema_alpha",
@@ -180,6 +191,7 @@ if __name__ == "__main__":
             "seed": args.seed,
             "entropy_thermostat": args.entropy_thermostat,
             "thermostat_target": args.thermostat_target,
+            "thermostat_normal_reward": args.thermostat_normal_reward,
             "thermostat_deadband": args.thermostat_deadband,
             "thermostat_ema_alpha": args.thermostat_ema_alpha,
             "thermostat_interval": args.thermostat_interval,

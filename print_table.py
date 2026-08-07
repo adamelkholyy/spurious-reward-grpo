@@ -6,7 +6,7 @@ import numpy as np
 BASELINE_FAMILIES = ("qwen", "llama", "olmo")
 
 # Labels containing any of these (case-insensitive) are dropped by default.
-DEFAULT_SKIP_SUBSTRINGS = ("4800", "lr")
+DEFAULT_SKIP_SUBSTRINGS = ( "lr", "SCHED", "r2", "gt_high", "gt_low", "high_llam", "high_olm", "high_qwe")
 
 _LATEX_ESCAPES = {
     "\\": r"\textbackslash{}",

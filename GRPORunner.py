@@ -16,7 +16,20 @@ class GRPORunner():
 
         ds = task.build_train(tokenizer)
 
-        reward_name = task.resolve_reward(getattr(args, "reward", None))
+        if getattr(args, "entropy_thermostat", False):
+            reward_name = getattr(args, "thermostat_normal_reward", None)
+            if reward_name is None:
+                raise ValueError(
+                    "--entropy_thermostat requires --thermostat_normal_reward "
+                    "for the ordinary task-training phase"
+                )
+            if getattr(args, "reward", None) is not None:
+                print(
+                    "NOTE: --reward is ignored in thermostat mode; "
+                    f"normal={reward_name}, SR=random"
+                )
+        else:
+            reward_name = task.resolve_reward(getattr(args, "reward", None))
         task.validate_reward(reward_name)
         reward_funcs = get_reward_funcs(reward_name)
 
@@ -39,10 +52,14 @@ class GRPORunner():
                 raise ValueError("--entropy_thermostat and --switch_step are mutually exclusive")
             if args.thermostat_target is None:
                 raise ValueError("--entropy_thermostat requires --thermostat_target")
-            if reward_name not in {"random", "random_p03", "random_p07", "gaussian"}:
+            print(
+                "Thermostat controls raw train/entropy directly "
+                f"(target={args.thermostat_target}, deadband={args.thermostat_deadband})"
+            )
+            if reward_name == "random":
                 raise ValueError(
-                    "The SR entropy thermostat requires a reward-independent signal: "
-                    "use --reward random (or random_p03/random_p07/gaussian)."
+                    "--thermostat_normal_reward must be the task reward, not random; "
+                    "the thermostat injects random automatically in SR regions"
                 )
 
             trainer = EntropyThermostatGRPOTrainer(
@@ -50,6 +67,7 @@ class GRPORunner():
                 processing_class=tokenizer,
                 args=grpo_args,
                 reward_funcs=reward_funcs,
+                sr_reward_funcs=get_reward_funcs("random"),
                 train_dataset=ds,
                 thermostat={
                     "target": float(args.thermostat_target),
@@ -93,7 +111,7 @@ class GRPORunner():
         config = dict(GRPO_CONFIG)
 
         if HPC: # CSD3 specific settings
-            if "Qwen" in  args.model:
+            if "qwen" in  args.model.lower():
                 config["vllm_gpu_memory_utilization"] = 0.22
                 print("Qwen, decreasing memory usage")
         else: # Flamingo specific settings 
@@ -101,7 +119,7 @@ class GRPORunner():
                 config["vllm_gpu_memory_utilization"] = 0.5
                 print("Qwen-0.5B, increasing memory usage")
 
-        if "3B" in args.model:
+        if "3b" in args.model.lower():
             config["vllm_gpu_memory_utilization"] = 0.275 # TEMP CHANGE # could be increased
             config["per_device_train_batch_size"] = 4 
             config["gradient_accumulation_steps"] = 16
@@ -111,7 +129,7 @@ class GRPORunner():
             config["vllm_gpu_memory_utilization"] = 0.20 if HPC else 0.22
 
         if getattr(args, "dataset", "x") == "mbpp":
-            if "Qwen" in args.model:
+            if "qwen" in args.model.lower():
                 config["vllm_gpu_memory_utilization"] = 0.25
             elif HPC:
                 config["vllm_gpu_memory_utilization"] = 0.35
@@ -134,6 +152,9 @@ class GRPORunner():
             config["seed"] = int(args.seed)
         if getattr(args, "lr", None) is not None:
             config["learning_rate"] = float(args.lr)
+        
+        if getattr(args, "save_steps", None) is not None:
+            config["save_steps"] = float(args.save_steps)
 
         if args.model == "meta-llama/Llama-3.2-1B-Instruct":
             config["vllm_gpu_memory_utilization"] = 0.40

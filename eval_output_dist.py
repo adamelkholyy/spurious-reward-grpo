@@ -549,7 +549,7 @@ def _checkpoints(run_dir: str):
     return sorted(ckpts)
 
 
-def discover_models(outputs_dir: str, all_checkpoints: bool = False):
+def discover_models(outputs_dir: str, all_checkpoints: bool = False, tag=None):
     if not os.path.isdir(outputs_dir):
         sys.exit(f"No such directory: {outputs_dir}")
 
@@ -559,6 +559,8 @@ def discover_models(outputs_dir: str, all_checkpoints: bool = False):
         if not os.path.isdir(run_dir):
             continue
         label = re.sub(r"-\d{8,}$", "", name)
+        if tag is not None and tag not in name:
+            continue
         if _ACTIVE_DATASET != "gsm8k":
             alias = _ACTIVE_DATASET
             if _ACTIVE_DATASET == "countdown4": alias = "countdown"
@@ -685,6 +687,12 @@ def main():
                     action="store_true",
                     help="Discovery mode: measure EVERY checkpoint per run "
                          "instead of just the latest")
+    
+    ap.add_argument("--tag", default=None,
+                        help="Only evaluate discovered runs whose folder name "
+                            "contains this substring; multi-checkpoint runs "
+                            "contribute only their latest checkpoint. Applies "
+                            "to auto-discovery; ignored with --models.")
     ap.add_argument("--skip-baselines", action="store_true",
                     help="Do not automatically inject and measure base "
                          "models.")
@@ -778,7 +786,7 @@ def main():
                     f"'{label}_grpo={path}'.")
             pairs.append((label, path))
     else:
-        pairs = discover_models(args.outputs_dir, args.all_checkpoints)
+        pairs = discover_models(args.outputs_dir, args.all_checkpoints, args.tag)
         # Discovered run dirs might coincidentally be named like a baseline;
         # rename rather than error since the user didn't type these.
         renamed = []

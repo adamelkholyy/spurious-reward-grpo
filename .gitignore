@@ -9,3 +9,4 @@ results/
 *.sh
 settings.py
 tasks/__pycache__/
+eval-outputs/

@@ -1,11 +1,12 @@
-"""Small, dependency-free controller for target-entropy GRPO experiments.
+"""Entropy thermostat operating directly on the observed training entropy.
 
 The controller is deliberately separate from TRL so its behaviour is easy to
-test and reason about.  It implements a bang-bang thermostat with hysteresis:
+test and reason about.  It implements a bang-bang controller with a target
+deadband:
 
-    H < target - deadband  -> entropy-up clipping
-    H > target + deadband  -> entropy-down clipping
-    otherwise              -> keep the current regime
+    H < target - deadband  -> SR + entropy-up clipping
+    H > target + deadband  -> SR + entropy-down clipping
+    otherwise              -> ground-truth training
 
 Entropy can be EMA-smoothed and the controller can be evaluated only every N
 optimizer steps.  The latter is useful when a GRPO rollout is reused for
@@ -32,7 +33,7 @@ class ThermostatObservation:
 
 
 class EntropyThermostat:
-    """Hysteretic controller that selects entropy-up/down clipping regimes."""
+    """Controller selecting GT training or an SR entropy-correction regime."""
 
     def __init__(
         self,
@@ -72,7 +73,7 @@ class EntropyThermostat:
         self.down_epsilon_low = float(down_epsilon_low)
         self.down_epsilon_high = float(down_epsilon_high)
 
-        self.state = "initial"
+        self.state = "gt"
         self.ema_entropy: float | None = None
         self.last_control_step: int | None = None
         self._observations_since_control = 0
@@ -81,18 +82,17 @@ class EntropyThermostat:
         """Consume one completed optimizer-step entropy observation.
 
         A decision is made after every ``control_interval`` completed optimizer
-        steps.  Inside the deadband the current clipping regime is retained
-        (true hysteresis).
+        steps.  Inside the target band the controller returns to GT training.
         """
-        entropy = float(entropy)
-        if not math.isfinite(entropy) or entropy < 0:
-            raise ValueError(f"entropy must be finite and >= 0, got {entropy}")
+        raw_entropy = float(entropy)
+        if not math.isfinite(raw_entropy) or raw_entropy < 0:
+            raise ValueError(f"entropy must be finite and >= 0, got {raw_entropy}")
 
         if self.ema_entropy is None:
-            self.ema_entropy = entropy
+            self.ema_entropy = raw_entropy
         else:
             a = self.ema_alpha
-            self.ema_entropy = a * entropy + (1.0 - a) * self.ema_entropy
+            self.ema_entropy = a * raw_entropy + (1.0 - a) * self.ema_entropy
 
         self._observations_since_control += 1
         due = self._observations_since_control >= self.control_interval
@@ -106,24 +106,25 @@ class EntropyThermostat:
             upper = self.target + self.deadband
 
             if self.ema_entropy < lower:
-                action = "up"
-                if self.state != "up":
-                    self.state = "up"
+                action = "sr_up"
+                if self.state != "sr_up":
+                    self.state = "sr_up"
                     switched = True
             elif self.ema_entropy > upper:
-                action = "down"
-                if self.state != "down":
-                    self.state = "down"
+                action = "sr_down"
+                if self.state != "sr_down":
+                    self.state = "sr_down"
                     switched = True
             else:
-                # Do not switch inside the band: keeping the previous state is
-                # what gives the controller hysteresis and prevents chatter.
-                action = "hold"
+                action = "gt"
+                if self.state != "gt":
+                    self.state = "gt"
+                    switched = True
 
         epsilon_low, epsilon_high = self.current_epsilons()
         return ThermostatObservation(
             step=int(step),
-            raw_entropy=entropy,
+            raw_entropy=raw_entropy,
             control_entropy=self.ema_entropy,
             error=self.ema_entropy - self.target,
             state=self.state,
@@ -135,8 +136,8 @@ class EntropyThermostat:
 
     def current_epsilons(self) -> tuple[float | None, float | None]:
         """Return clipping for the current state; ``None`` means unchanged."""
-        if self.state == "up":
+        if self.state == "sr_up":
             return self.up_epsilon_low, self.up_epsilon_high
-        if self.state == "down":
+        if self.state == "sr_down":
             return self.down_epsilon_low, self.down_epsilon_high
         return None, None
