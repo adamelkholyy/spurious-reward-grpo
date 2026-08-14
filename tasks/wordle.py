@@ -34,7 +34,8 @@ from __future__ import annotations
 import os
 import random
 import re
-from typing import Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+import typing
 
 from .base import DatasetSpec
 from .registry import register_task
@@ -98,7 +99,7 @@ _FALLBACK_WORDS = (
 _FALLBACK_WORDS = sorted({w for w in _FALLBACK_WORDS if len(w) == WORD_LEN})
 
 
-def _read_words(fname: str) -> List[str]:
+def _read_words(fname: str) -> typing.List[str]:
     path = os.path.join(_WORDS_DIR, fname)
     try:
         with open(path) as f:
@@ -107,11 +108,11 @@ def _read_words(fname: str) -> List[str]:
         return []
 
 
-_TARGETS: Optional[List[str]] = None
-_VALID: Optional[set] = None
+_TARGETS: typing.Optional[typing.List[str]] = None
+_VALID: typing.Optional[set] = None
 
 
-def _load_word_lists() -> Tuple[List[str], set]:
+def _load_word_lists() -> typing.Tuple[typing.List[str], set]:
     """Lazily load (targets, valid_guesses). Falls back to a small embedded
     list (with a warning) when the word-list files are absent."""
     global _TARGETS, _VALID
@@ -139,7 +140,7 @@ def _load_word_lists() -> Tuple[List[str], set]:
 # ---------------------------------------------------------------------------
 # Wordle mechanics
 # ---------------------------------------------------------------------------
-def compute_feedback(guess: str, target: str) -> List[str]:
+def compute_feedback(guess: str, target: str) -> typing.List[str]:
     """Return per-position ['green'|'yellow'|'red'] for guess vs target.
 
     Standard Wordle duplicate handling: greens first, then yellows drawn from
@@ -147,7 +148,7 @@ def compute_feedback(guess: str, target: str) -> List[str]:
     """
     guess, target = guess.lower(), target.lower()
     res = ["red"] * WORD_LEN
-    counts: Dict[str, int] = {}
+    counts: typing.Dict[str, int] = {}
     for ch in target:
         counts[ch] = counts.get(ch, 0) + 1
     for i in range(WORD_LEN):
@@ -185,7 +186,7 @@ _FB_LINE_RE = re.compile(
 _FB_TOK_RE = re.compile(r"([a-zA-Z])<(green|yellow|red)>", re.IGNORECASE)
 
 
-def parse_guess(text: str) -> Optional[str]:
+def parse_guess(text: str) -> typing.Optional[str]:
     """Extract the model's guessed word (first 'guess:' occurrence).
 
     A capture that is immediately followed by ':' is another tag label, not a
@@ -206,7 +207,7 @@ def parse_guess(text: str) -> Optional[str]:
         return m.group(1).lower()
 
 
-def parse_feedback_history(prompt_text: str) -> List[List[Tuple[str, str]]]:
+def parse_feedback_history(prompt_text: str) -> typing.List[typing.List[typing.Tuple[str, str]]]:
     """Reconstruct prior turns from the rendered guess_feedback lines in a
     prompt. Each turn -> [(letter, color) x5].
 
@@ -225,7 +226,7 @@ def parse_feedback_history(prompt_text: str) -> List[List[Tuple[str, str]]]:
 
 
 # --- constraint model (for feedback-consistency) ---------------------------
-def _constraints(rows: List[List[Tuple[str, str]]]):
+def _constraints(rows: typing.List[typing.List[typing.Tuple[str, str]]]):
     """Aggregate hard-mode constraints from prior feedback rows.
 
     Returns (green_pos, banned_pos, min_count, max_count):
@@ -233,13 +234,13 @@ def _constraints(rows: List[List[Tuple[str, str]]]):
       banned_pos: set of (i, letter) (letter must NOT be at i, but must appear)
       min_count[letter], max_count[letter]: letter-multiplicity bounds
     """
-    green_pos: Dict[int, str] = {}
+    green_pos: typing.Dict[int, str] = {}
     banned_pos = set()
-    min_count: Dict[str, int] = {}
-    max_count: Dict[str, int] = {}
+    min_count: typing.Dict[str, int] = {}
+    max_count: typing.Dict[str, int] = {}
     for row in rows:
-        gy: Dict[str, int] = {}
-        red: Dict[str, int] = {}
+        gy: typing.Dict[str, int] = {}
+        red: typing.Dict[str, int] = {}
         for i, (ch, color) in enumerate(row):
             if color == "green":
                 green_pos[i] = ch
@@ -258,7 +259,7 @@ def _constraints(rows: List[List[Tuple[str, str]]]):
     return green_pos, banned_pos, min_count, max_count
 
 
-def is_consistent(guess: str, rows: List[List[Tuple[str, str]]]) -> bool:
+def is_consistent(guess: str, rows: typing.List[typing.List[typing.Tuple[str, str]]]) -> bool:
     """True if `guess` respects every constraint implied by prior feedback
     (i.e. it is a legal hard-mode guess given the history)."""
     if len(guess) != WORD_LEN:
@@ -282,7 +283,7 @@ def is_consistent(guess: str, rows: List[List[Tuple[str, str]]]) -> bool:
 # ---------------------------------------------------------------------------
 # Game-state rendering (prompt body shared by training and eval)
 # ---------------------------------------------------------------------------
-def render_user_turn(history: List[Tuple[str, List[str]]]) -> str:
+def render_user_turn(history: typing.List[typing.Tuple[str, typing.List[str]]]) -> str:
     """Full guesser user-turn text: the base prompt plus a transcript of prior
     (guess, feedback) turns. `history` is a list of (guess, colors)."""
     parts = [GUESSER_PROMPT]
@@ -294,9 +295,9 @@ def render_user_turn(history: List[Tuple[str, List[str]]]) -> str:
 
 def _sample_history(target, k, valid_list, rng, consistent_chain):
     """Build k prior (guess, colors) turns for a game whose answer is target."""
-    history: List[Tuple[str, List[str]]] = []
+    history: typing.List[typing.Tuple[str, typing.List[str]]] = []
     used = set()
-    rows: List[List[Tuple[str, str]]] = []
+    rows: typing.List[typing.List[typing.Tuple[str, str]]] = []
     for _ in range(k):
         pool = valid_list
         if consistent_chain:
@@ -468,7 +469,7 @@ class WordleTask(DatasetSpec):
     seed = int(os.environ.get("WORDLE_SEED", "0"))
 
     # ---- shared state generation ----
-    def _make_examples(self, n: int, seed: int) -> List[Dict[str, str]]:
+    def _make_examples(self, n: int, seed: int) -> typing.List[typing.Dict[str, str]]:
         targets, valid = _load_word_lists()
         valid_list = sorted(valid)
         rng = random.Random(seed)
@@ -518,7 +519,7 @@ class WordleTask(DatasetSpec):
     def extract_gold(self, answer_field) -> str:
         return str(answer_field).strip().lower()
 
-    def extract_answer(self, completion: str) -> Optional[str]:
+    def extract_answer(self, completion: str) -> typing.Optional[str]:
         return parse_guess(completion)
 
     def make_grader(self):

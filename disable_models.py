@@ -30,10 +30,6 @@ def save_disabled(disabled):
 
 
 def load_evaluated_models():
-    """
-    Returns all labels and model paths that have already appeared
-    in any result file.
-    """
     evaluated_labels = set()
     evaluated_paths = set()
 
@@ -51,9 +47,7 @@ def load_evaluated_models():
 
 
 def get_available_models():
-    """
-    Models in outputs that have not already been evaluated.
-    """
+
     evaluated_labels, evaluated_paths = load_evaluated_models()
 
     models = []
@@ -64,11 +58,11 @@ def get_available_models():
         if not os.path.isdir(path):
             continue
 
-        # Skip if the run label exists in results
+        # skip if the run label exists in results
         if name in evaluated_labels:
             continue
 
-        # Skip if any checkpoint from this run exists in results
+        # skip if any checkpoint from this run exists in results
         already_done = any(
             model_path.startswith(path)
             for model_path in evaluated_paths
