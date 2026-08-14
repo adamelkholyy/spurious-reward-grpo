@@ -152,7 +152,7 @@ _register_reward()
 # ---------------------------------------------------------------------------
 @register_task
 class Countdown4Task(DatasetSpec):
-    name = "countdown4"
+    name = "countdown"
     hf_path = "Jiayi-Pan/Countdown-Tasks-4"
     hf_config = None
     train_split = "train"

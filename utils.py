@@ -1,16 +1,9 @@
 import os
 import re
-import time
-from typing import Any, Tuple
+from typing import Any, tuple
 
 
 def get_completion_text(completion: Any) -> str:
-    """Return generated text for both plain-text and chat-style completions.
-
-    In TRL GRPO:
-      - If your dataset has `prompt: str`, completions are returned as plain strings.
-      - If your dataset has `prompt: list[{'role','content'}]`, completions are returned as chat messages.
-    """
 
     if isinstance(completion, str):
         return completion
@@ -53,17 +46,11 @@ def save_model(trainer, label):
 
 
 def strip_calculator_annotations(text: str) -> str:
-    """Remove GSM8K-style calculator annotations (e.g. '<<48/2=24>>').
-
-    The raw GSM8K 'main' split embeds these inline within the reasoning
-    (e.g. "...sold 48/2 = <<48/2=24>>24 clips..."). They aren't natural
-    language and training on them as-is can push generations toward an
-    unnatural format, which we've seen hurts flexible-match extraction at
-    eval time. This strips them while leaving the surrounding text intact.
-    """
+    """Remove GSM8K-style calculator annotations (e.g. '<<48/2=24>>')."""
     return re.sub(r"<<[^>]*>>", "", text)
 
-def split_prompt_answer(text: str) -> Tuple[str, str]:
+
+def split_prompt_answer(text: str) -> tuple[str, str]:
 
     split_pattern = re.compile(r"(\nAnswer:|\nCorrect:|\nSolution\n|\nEndings:\n)")
     matches = list(split_pattern.finditer(text))

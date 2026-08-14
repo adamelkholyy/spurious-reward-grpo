@@ -1,60 +1,6 @@
 #!/usr/bin/env python3
 """
-eval_output_dist.py — Measure output distributions of model checkpoints
-(companion to eval_gsm8k.py, sharing its harness; measurement machinery
-from output_dist.py).
-
-For every model this script samples `num_samples` completions per GSM8K
-train prompt at the GRPO rollout settings (T=1.0, top_p=1.0, top_k=0,
-repetition_penalty=1.0), then runs a teacher-forced scoring pass computing,
-per completion token, BOTH the logprob of the realized token and the
-full-distribution entropy. It also greedy-decodes each prompt as a
-high-probability reference trajectory (optional beam search).
-
-Measurement settings (prompt format, seeded prompt sampling, and the
-default 128-prompt x 8-rollout geometry) are aligned with
-eval_entropy_gsm8k.py so the two scripts measure the same rollout
-distribution: system prompt "Please reason step by step, and put your
-final answer within \\boxed{}." + bare question, no stop strings, EOS-only
-completion masking. Per-rollout metrics (mean_entropy = per-sequence
-entropy sum / token count, etc.) are unchanged; note this remains a
-per-rollout mean — compare against eval_entropy_gsm8k's
-per_generation_mean_nats, not its token-weighted token_mean_entropy_nats.
-
-Harness behavior matches eval_gsm8k.py:
-  - each model runs in a fresh subprocess so the GPU is released cleanly
-  - models auto-discovered from outputs/ (or given via --models label=path)
-  - base models auto-injected per family and their results cached
-  - persistent results JSON keyed by measurement config: finished models
-    are skipped on re-runs, results saved incrementally
-
-The output JSON (--out, default results/results_output_dist.json) is a list of
-per-model records built for plotting the distribution curves. Each record
-contains, for the metrics avg_logprob / logprob_per_char / mean_entropy /
-num_tokens:
-  - "distributions": raw per-sample values (one float per sampled rollout)
-    -> plot these directly (seaborn kdeplot / plt.hist)
-  - "stats": mean, std, min, max, percentiles
-  - "histograms": precomputed 50-bin density histograms (bin_edges +
-    density) if you want to plot without recomputing
-  - "greedy_ref": mean of the greedy trajectories per metric (the dashed
-    reference line in the bell-curve plots)
-plus the full per-sample records under "samples" / "greedy" / "beams".
-
-Minimal plotting example:
-
-    import json, matplotlib.pyplot as plt
-    results = json.load(open("results/results_output_dist.json"))
-    for r in results:
-        vals = r["distributions"]["avg_logprob"]
-        plt.hist(vals, bins=50, density=True, alpha=0.4, label=r["label"])
-        plt.axvline(r["greedy_ref"]["avg_logprob"], ls="--")
-    plt.xlabel("avg per-token logprob (nats)"); plt.legend(); plt.show()
-
-Cross-model comparability note: avg *per-token* logprob depends on the
-tokenizer (different vocab sizes / compression rates), so per-character
-logprob is also recorded — prefer it when comparing across model families
-rather than across checkpoints of the same family.
+eval_output_dist.py — Measure entropy distributions of model checkpoints
 """
 
 import argparse
@@ -68,17 +14,7 @@ import tempfile
 import time
 from settings import HPC
 
-# ===========================================================================
-# Define your base models here.
-# The script will auto-run these and use them as the reference for deltas.
-# NOTE: these labels are RESERVED — a run passed via --models may not reuse
-# them (it would silently masquerade as the baseline in the results table).
-#
-# Baselines are only measured when (a) a run in this sweep maps to that
-# family, and (b) no cached result exists for the current config. Baseline
-# results are cached (see --baseline-cache / --refresh-baselines) because
-# they never change between sweeps.
-# ===========================================================================
+
 BASE_MODELS = {
     "qwen": "Qwen/Qwen2.5-1.5B-Instruct",
     "llama": "meta-llama/Llama-3.2-1B-Instruct",
@@ -87,11 +23,10 @@ BASE_MODELS = {
     "qwen3b": "Qwen/Qwen2.5-3B-Instruct"
 } 
 
-# All results / caches live here (dataset identity is already recorded
-# inside each entry's measure_config, so the filenames stay fixed).
+
 RESULTS_DIR = "results"
 
-# Metrics whose sampled-pool distributions are exported for plotting.
+
 DIST_METRICS = ["avg_logprob", "logprob_per_char", "mean_entropy",
                 "num_tokens"]
 
@@ -102,23 +37,7 @@ if os.path.exists(DISABLED_FILE):
     with open(DISABLED_FILE) as f:
         disabled = set(json.load(f))
 
-# ---------------------------------------------------------------------------
-# Prompts — GSM8K *train* split, formatted IDENTICALLY to
-# eval_entropy_gsm8k.py: system prompt + bare question, chat template with
-# add_generation_prompt=True. Same seeded sampling (random.Random(seed)
-# over dataset indices), so with the same seed/num_prompts both scripts
-# see the exact same questions in the same order.
-#
-# Fallback: if a tokenizer ships no chat template (e.g. OLMo-2 base), we
-# apply explicit ChatML anyway (same rationale as eval_gsm8k.py — one prompt
-# format across families; special tokens tokenize as plain text on non-Qwen
-# vocabs). The path taken is recorded per model as "prompt_template".
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Dataset task: seeded question sampling + eval prompt building are delegated
-# to tasks/<name>.py, selected with --dataset. build_prompts keeps its
-# signature/return shape so the rest of this file is unchanged.
-# ---------------------------------------------------------------------------
+
 from tasks import available_tasks, get_task  # noqa: E402
 
 _ACTIVE_DATASET = "gsm8k"
@@ -129,12 +48,7 @@ def _task():
 
 
 def build_prompts(tokenizer, num_prompts: int, seed: int):
-    """Returns (prompt_texts, question_texts, template_used).
-
-    Uses the active task's seeded sampler (so every model sees the same
-    questions in the same order) and its eval prompt builder (chat template
-    with ChatML fallback). Identical questions/order to eval_entropy_gsm8k.py
-    for the same seed/num_prompts.
+    """returns (prompt_texts, question_texts, template_used).
     """
     questions = _task().sample_questions(
         _OUTPUT_DIST_SPLIT, num_prompts, seed
@@ -143,13 +57,11 @@ def build_prompts(tokenizer, num_prompts: int, seed: int):
     return prompts, questions, template
 
 
-# Split sampled by this script (GSM8K *train* — the rollout distribution).
+
 _OUTPUT_DIST_SPLIT = "train"
 
 
-# ---------------------------------------------------------------------------
-# Generation + teacher-forced scoring (from output_dist.py)
-# ---------------------------------------------------------------------------
+
 def set_all_seeds(seed: int):
     import random
     import torch
@@ -165,10 +77,7 @@ def set_all_seeds(seed: int):
 
 
 def completion_end_mask(comp, model, tokenizer):
-    """Bool mask over completion tokens: True up to and incl. the FIRST EOS;
-    everything after is padding. EOS-only terminators, identical to
-    eval_entropy_gsm8k.py (HF only emits pad_token_id after a row has hit
-    EOS, so the cumsum below already excludes batch padding)."""
+
     import torch
     end_ids = model.generation_config.eos_token_id
     if end_ids is None:
@@ -184,8 +93,8 @@ def completion_end_mask(comp, model, tokenizer):
 
 def generate_batch(model, tokenizer, prompts, args, template_used,
                    greedy=False, num_beams=1, num_return_sequences=1):
-    """Generate for a batch of prompts (no_grad). Left-padded decoder-only
-    generation, matching the GRPO rollout setup."""
+    """generate for a batch of prompts (no_grad), left-padded decoder-only
+    generation, matching GRPO rollout setup."""
     import torch
 
     with torch.no_grad():
@@ -201,12 +110,9 @@ def generate_batch(model, tokenizer, prompts, args, template_used,
         gen_kwargs = dict(
             max_new_tokens=args.max_new_tokens,
             pad_token_id=tokenizer.pad_token_id,
-            repetition_penalty=1.0,  # Qwen ships 1.05 in generation_config
+            repetition_penalty=1.0,  
         )
-        # NOTE: no stop_strings — matches eval_entropy_gsm8k.py. Base models
-        # on the ChatML fallback have no EOS in-format and will usually run
-        # to max_new_tokens; that's fine, the distribution is still measured
-        # over the tokens actually sampled from the policy.
+        
         if greedy and num_beams == 1:
             gen_kwargs.update(do_sample=False)
         elif num_beams > 1:
@@ -225,8 +131,7 @@ def generate_batch(model, tokenizer, prompts, args, template_used,
         comp = out[:, prompt_len:]
         cmask = completion_end_mask(comp, model, tokenizer)
 
-        # For beam search, prompts are expanded num_return_sequences times;
-        # expand the attention mask to match.
+
         pmask = enc.attention_mask
         if out.shape[0] != pmask.shape[0]:
             rep = out.shape[0] // pmask.shape[0]
@@ -237,14 +142,8 @@ def generate_batch(model, tokenizer, prompts, args, template_used,
 def score_batch(model, sequences, prompt_attention_mask, prompt_len,
                 completion_mask, temperature: float, chunk: int = 256,
                 score_batch_size: int = 4):
-    """Teacher-forced pass computing per-sequence (sum_logprob, sum_entropy,
-    num_tokens), all fp64 on CPU.
 
-    Chunking bounds the fp32 softmax intermediates; `score_batch_size` is
-    the real memory knob because the forward materializes the full
-    (b, seq, vocab) bf16 logits. Explicit position_ids keep the scored
-    distribution identical to the one sampled from under left padding.
-    """
+
     import torch
     import torch.nn.functional as F
 
@@ -293,9 +192,7 @@ def score_batch(model, sequences, prompt_attention_mask, prompt_len,
     return lp_sum, ent_sum, tok
 
 
-# ---------------------------------------------------------------------------
-# Plot-ready aggregation
-# ---------------------------------------------------------------------------
+
 def _percentile(sorted_vals, q):
     """Linear-interpolation percentile on a pre-sorted list (q in [0,100])."""
     n = len(sorted_vals)
@@ -331,7 +228,7 @@ def summarize(vals):
 
 
 def histogram(vals, bins=50):
-    """Density histogram as {bin_edges, density} (pure python, no numpy)."""
+    """Density histogram as {bin_edges, density}"""
     if not vals:
         return None
     lo, hi = min(vals), max(vals)
@@ -348,9 +245,6 @@ def histogram(vals, bins=50):
     return {"bin_edges": edges, "density": density}
 
 
-# ---------------------------------------------------------------------------
-# Worker: measure ONE model in this process, write JSON, exit.
-# ---------------------------------------------------------------------------
 def run_one(args):
     import torch
     from tqdm.auto import tqdm
@@ -361,7 +255,7 @@ def run_one(args):
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cpu":
-        print("WARNING: no GPU detected — this will be very slow.",
+        print("WARNING: no GPU detected",
               file=sys.stderr)
 
     set_all_seeds(args.seed)
@@ -393,7 +287,7 @@ def run_one(args):
     records = []  # one dict per sampled completion
     t_start = time.perf_counter()
 
-    # ---- 1) sampled pool + teacher-forced scoring ------------------------
+    # sampled pool + teacher-forced scoring 
     pbar = tqdm(total=len(expanded), unit="rollout",
                 desc=f"[{pos}] {args.label}: sampling")
     for s in range(0, len(expanded), args.batch_size):
@@ -428,7 +322,7 @@ def run_one(args):
         pbar.set_postfix(avg_lp=f"{avg:.3f}")
     pbar.close()
 
-    # ---- 2) greedy trajectories (high-probability reference) -------------
+    # greedy trajectories (high-probability reference)
     greedy = []
     for s in tqdm(range(0, len(prompts), args.batch_size),
                   desc=f"[{pos}] {args.label}: greedy"):
@@ -454,7 +348,7 @@ def run_one(args):
                 rec["text"] = text
             greedy.append(rec)
 
-    # ---- 3) optional beam search ------------------------------------------
+    #  optional beam search
     beams = []
     if args.num_beams > 1:
         n_ret = min(args.beam_return, args.num_beams)
@@ -483,7 +377,7 @@ def run_one(args):
 
     elapsed = time.perf_counter() - t_start
 
-    # ---- plot-ready aggregation --------------------------------------------
+    # plot-ready aggregation 
     distributions = {k: [r[k] for r in records] for k in DIST_METRICS}
     stats = {k: summarize(v) for k, v in distributions.items()}
     hists = {k: histogram(v) for k, v in distributions.items()}
@@ -503,12 +397,12 @@ def run_one(args):
         "max_new_tokens": args.max_new_tokens,
         "seed": args.seed,
         "num_beams": args.num_beams,
-        # ---- plot these ----
+
         "distributions": distributions,
         "stats": stats,
         "histograms": hists,
         "greedy_ref": greedy_ref,
-        # ---- full per-rollout data ----
+
         "questions": questions,
         "samples": records,
         "greedy": greedy,
@@ -524,10 +418,7 @@ def run_one(args):
           f"len {stats['num_tokens']['mean']:.0f} tok | {elapsed:.0f}s")
 
 
-# ---------------------------------------------------------------------------
-# Auto-discovery: scan outputs/ for non-empty model folders.
-# (Identical to eval_gsm8k.py.)
-# ---------------------------------------------------------------------------
+
 def _is_model_dir(d: str) -> bool:
     if not os.path.isdir(d):
         return False
@@ -597,9 +488,7 @@ def discover_models(outputs_dir: str, all_checkpoints: bool = False, tag=None):
     return uniq
 
 
-# ---------------------------------------------------------------------------
-# Baseline bookkeeping: family mapping + result cache.
-# ---------------------------------------------------------------------------
+
 def get_baseline_key(label):
     """Map a run label to its base-model family (or None)."""
     lbl = label.lower()
@@ -622,9 +511,6 @@ def _measure_config_key(model_path: str, args) -> str:
     cfg = {
         "task": "output_dist",
         "dataset": get_task(args.dataset).eval_dataset_id(_OUTPUT_DIST_SPLIT),
-        # Prompt format is part of the measurement semantics; bumped when it
-        # changed from the verl "####" suffix to the system/\boxed{} prompt
-        # (eval_entropy_gsm8k.py format) so stale results aren't reused.
         "prompt": "system_boxed",
         "model": model_path,
         "num_prompts": args.num_prompts,
@@ -667,9 +553,7 @@ def _load_results_file(path: str) -> list:
     return []
 
 
-# ---------------------------------------------------------------------------
-# Driver: spawn one worker subprocess per model, aggregate, compare.
-# ---------------------------------------------------------------------------
+
 def main():
     ap = argparse.ArgumentParser(
         description="Measure output distributions of models on dataset "
@@ -690,16 +574,13 @@ def main():
     
     ap.add_argument("--tag", default=None,
                         help="Only evaluate discovered runs whose folder name "
-                            "contains this substring; multi-checkpoint runs "
-                            "contribute only their latest checkpoint. Applies "
-                            "to auto-discovery; ignored with --models.")
+                            "contains this substring")
     ap.add_argument("--skip-baselines", action="store_true",
-                    help="Do not automatically inject and measure base "
+                    help="Do not automatically measure base "
                          "models.")
     ap.add_argument("--refresh-baselines", dest="refresh_baselines",
                     action="store_true",
-                    help="Re-measure baselines even if cached results exist "
-                         "for this config.")
+                    help="Re-measure baselines even if cached results exist")
     ap.add_argument("--baseline-cache", dest="baseline_cache",
                     default=os.path.join(
                         RESULTS_DIR, ".output_dist_baseline_cache.json"),
@@ -707,31 +588,22 @@ def main():
                          f"{RESULTS_DIR}/.output_dist_baseline_cache.json)")
     ap.add_argument("--num-prompts", dest="num_prompts", type=int,
                     default=128,
-                    help="Number of GSM8K train prompts (default 128, "
-                         "matching eval_entropy_gsm8k.py; seeded, so "
-                         "identical across all models).")
+                    help="Number of train prompts")
     ap.add_argument("--num-samples", dest="num_samples", type=int, default=8,
-                    help="Sampled rollouts per prompt (default 8, matching "
-                         "the GRPO config / eval_entropy_gsm8k.py); "
-                         "histogram pool = num_prompts * num_samples.")
+                    help="Sampled rollouts per prompt ")
     ap.add_argument("--temperature", type=float, default=1.0,
-                    help="Sampling temperature (default 1.0 — the GRPO "
-                         "rollout setting; also used to temper the scored "
-                         "distribution).")
+                    help="Sampling temperature ")
     ap.add_argument("--max-new-tokens", dest="max_new_tokens", type=int,
                     default=1024)
     ap.add_argument("--num-beams", dest="num_beams", type=int, default=1,
-                    help=">1 enables beam search per prompt (slow at 1024 "
-                         "tokens; try 8 on a few prompts first).")
+                    help="1 enables beam search per prompt ")
     ap.add_argument("--beam-return", dest="beam_return", type=int, default=5)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--batch-size", dest="batch_size", type=int, default=16)
     ap.add_argument("--score-batch-size", dest="score_batch_size", type=int,
-                    default=4,
-                    help="Main memory knob for the teacher-forced pass.")
+                    default=4)
     ap.add_argument("--no-texts", dest="no_texts", action="store_true",
-                    help="Drop completion texts from the JSON (much smaller "
-                         "file; the distributions/stats are unaffected).")
+                    help="Drop completion texts from the JSON")
     ap.add_argument("--out",
                     default=os.path.join(RESULTS_DIR,
                                          "results_output_dist.json"),
@@ -743,7 +615,7 @@ def main():
                     help="Re-measure models even if a result with the same "
                          "config already exists in the results file.")
 
-    # internal worker flags (not for direct use)
+
     ap.add_argument("--worker-out", dest="worker_out", default=None,
                     help=argparse.SUPPRESS)
     ap.add_argument("--model", default=None, help=argparse.SUPPRESS)
@@ -757,7 +629,7 @@ def main():
     global _ACTIVE_DATASET
     _ACTIVE_DATASET = args.dataset
 
-    # Worker mode: a single model path was injected by the driver.
+
     if args.worker_out:
         run_one(args)
         return
@@ -769,8 +641,7 @@ def main():
 
     if args.num_samples > 1 and args.temperature == 0.0:
         print("WARNING: --num-samples > 1 with temperature 0 gives "
-              "identical samples — the 'distribution' will be a spike. "
-              "Use temperature 1.0 (the rollout setting).", file=sys.stderr)
+              "identical samples", file=sys.stderr)
 
     pairs = []
     if args.models:
@@ -787,8 +658,8 @@ def main():
             pairs.append((label, path))
     else:
         pairs = discover_models(args.outputs_dir, args.all_checkpoints, args.tag)
-        # Discovered run dirs might coincidentally be named like a baseline;
-        # rename rather than error since the user didn't type these.
+
+
         renamed = []
         for i, (label, path) in enumerate(pairs):
             if label in BASE_MODELS:
@@ -800,9 +671,7 @@ def main():
         if not pairs and args.skip_baselines:
             sys.exit("No models found and baselines skipped.")
 
-    # Auto-inject base models — only the families some run in this sweep
-    # maps to. (If there are no runs at all, measure every baseline: the
-    # user is explicitly profiling the bases.)
+
     baseline_labels = set()
     if not args.skip_baselines:
         existing_paths = {p for _, p in pairs}
@@ -825,8 +694,7 @@ def main():
 
     baseline_cache = _load_baseline_cache(args.baseline_cache)
 
-    # Persistent results file: load what's already there, skip anything
-    # already measured under this exact config, append/upsert the rest.
+
     prior = _load_results_file(args.out)
     by_key, legacy = {}, []
     for r in prior:
@@ -845,7 +713,7 @@ def main():
         key = _measure_config_key(path, args)
         pos = f"{m_idx}/{total_models}"
 
-        # 1) Already in the results file under this config? Reuse.
+        # already in the results file under this config
         if not args.force and key in by_key:
             r = dict(by_key[key])
             r["label"] = label
@@ -853,7 +721,7 @@ def main():
                   f"{args.out}, reusing (--force to re-measure) ===")
             print(f"[{label}] avg lp = "
                   f"{r['stats']['avg_logprob']['mean']:.4f}  (from file)")
-        # 2) Baseline with a cached result? Reuse.
+        # baseline with a cached result
         elif is_base and not args.refresh_baselines and key in baseline_cache:
             r = dict(baseline_cache[key])
             r["label"] = label
@@ -861,7 +729,7 @@ def main():
                   f"baseline result (--refresh-baselines to re-run) ===")
             print(f"[{label}] avg lp = "
                   f"{r['stats']['avg_logprob']['mean']:.4f}  (cached)")
-        # 3) Actually measure.
+        # else measure.
         else:
             tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
             tmp.close()
@@ -906,14 +774,12 @@ def main():
         r["is_baseline"] = is_base
         by_key[key] = r
         results.append(r)
-        # Save incrementally (merged with prior entries) so a crash
-        # mid-sweep doesn't lose finished measurements.
+
+  
         with open(args.out, "w") as f:
             json.dump(legacy + list(by_key.values()), f, indent=2)
 
-    # -----------------------------------------------------------------------
-    # Table: group base models, map runs to baselines, and compute Δ
-    # -----------------------------------------------------------------------
+
     base_results = {r["label"]: r for r in results if r["is_baseline"]}
     run_results = [r for r in results if not r["is_baseline"]]
 
@@ -944,7 +810,7 @@ def main():
                 f"{s['num_tokens']['mean']:>8.0f}"
                 f"{d_lp_str:>12}{d_h_str:>12}")
 
-    # 1. Print base models
+
     for b_lbl in BASE_MODELS:
         if b_lbl in base_results:
             print(fmt_row(base_results[b_lbl], "+0.000", "+0.000"))
@@ -952,7 +818,7 @@ def main():
     if base_results and run_results:
         print("-" * width)
 
-    # 2. Print individual runs mapped to their bases
+
     for r in run_results:
         b_key = get_baseline_key(r["label"])
 
@@ -976,9 +842,7 @@ def main():
 
     print("=" * width)
     print(f"\nFull per-rollout results written to {args.out}")
-    print("Plot the curves from result['distributions'][metric] "
-          "(raw values) or result['histograms'][metric] (precomputed); "
-          "dashed reference lines from result['greedy_ref'][metric].")
+    
 
 
 if __name__ == "__main__":

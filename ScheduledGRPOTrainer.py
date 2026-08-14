@@ -1,86 +1,19 @@
-"""
-scheduled_grpo_trainer.py
-
-A thin wrapper around TRL's `GRPOTrainer` that lets you change the clipping
-epsilon(s) and/or the reward function(s) at one or more training steps.
-
-Verified against the GRPOTrainer internals on trl `main`:
-  - epsilon clip bounds:      self.epsilon_low, self.epsilon_high
-                              (read fresh inside `compute_loss`)
-  - reward functions:         self.reward_funcs           (list)
-                              self.reward_func_names       (list, used for log keys)
-                              self.reward_weights          (float tensor)
-                              self.reward_processing_classes (list, None for callables)
-                              (all used inside `_generate_and_score_completions`)
-  - meaningful step counter:  self.state.global_step
-
-Semantics
----------
-A change scheduled for `step=S` is applied once `self.state.global_step >= S`.
-Because global_step is incremented *after* the optimizer step, this means the
-change is active for the update on which global_step has reached S.
-
-  * epsilon changes take effect immediately on the next `compute_loss` (every step).
-  * reward changes are picked up on the next generation cycle. GRPO generates and
-    scores in batches every `steps_per_generation * num_iterations` micro-steps and
-    buffers the result, so a reward swap may lag the target step by up to one
-    generation cycle. This is inherent to GRPO's buffering, not the wrapper.
-
-Only what you specify is changed. `epsilon` sets the lower clip bound and
-`epsilon_high` the upper bound, mirroring `GRPOConfig` (where `epsilon_high`
-defaults to `epsilon`). If you want symmetric clipping, set both.
-
-Swapping in plain callable rewards is fully handled. Swapping in a *model-based*
-reward (an `nn.Module` / reward model) at runtime is best-effort: the wrapper will
-`accelerator.prepare_model(...)` it, but you must also supply a matching
-`reward_processing_classes` entry, and this path is less battle-tested than
-starting training with the model already registered.
-
-Checkpointing on switch
------------------------
-With `save_on_switch=True` (the default) the trainer writes a normal HF
-checkpoint at the instant a change is applied. Because `global_step` has not yet
-been incremented for the in-flight update, a change scheduled at step 400 lands
-in `<output_dir>/checkpoint-400`, holding the weights as they were when the
-switch took effect. A small `switch_info.json` is written alongside it recording
-what changed.
-
-Caveats:
-  * The save happens mid-step (inside `compute_loss` or
-    `_generate_and_score_completions`), so gradients for the in-flight
-    micro-batch are partially accumulated and any stateful-dataloader position is
-    mid-generation-batch. Weights, optimizer and scheduler state are consistent,
-    so resuming works; you may just replay a fraction of a batch.
-  * `save_total_limit` would normally rotate these away later. With
-    `protect_switch_checkpoints=True` (default) switch checkpoints are excluded
-    from the rotation candidate list.
-  * If the target directory already exists (e.g. you resumed from exactly that
-    checkpoint and the change re-fires), the save is skipped rather than
-    clobbering it.
-  * Nothing is saved for changes that fire before `train()` starts, e.g. a
-    schedule entry at step 0 - there is no optimizer state to write yet.
-"""
-
 from __future__ import annotations
 
 import inspect
 import json
 import os
 
-# import logging
-from typing import Any, Callable, Optional, Sequence, Union
+from typing import Any, Optional, Union
+from collections.abc import Callable, Sequence
 
 import torch
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from trl import GRPOTrainer
 
-# logger = logging.getLogger(__name__)
-
-# These TRL helpers determine the log-metric key for each reward func
-# (e.g. "rewards/<name>"). Fall back gracefully if the internal path moves.
 try:
     from trl.trainer.utils import get_callable_name, get_config_model_id
-except Exception:  # pragma: no cover - defensive against TRL refactors
+except Exception:
 
     def get_callable_name(func: Callable) -> str:
         return getattr(func, "__name__", func.__class__.__name__)
@@ -95,29 +28,6 @@ RewardFunc = Union[Callable, torch.nn.Module, str]
 class ScheduledGRPOTrainer(GRPOTrainer):
     """
     GRPOTrainer that applies a schedule of parameter/reward changes during training.
-
-    Parameters
-    ----------
-    schedule : list of dict, optional
-        Each dict must contain "step" (int) and any of:
-          - "epsilon"                  -> new self.epsilon_low (lower clip bound)
-          - "epsilon_high"             -> new self.epsilon_high (upper clip bound)
-          - "reward_funcs"             -> callable | nn.Module | list of them
-          - "reward_weights"           -> sequence of floats (optional, per reward_func)
-          - "reward_processing_classes"-> list (optional; needed for model rewards)
-          - "save_checkpoint"          -> bool (optional; per-change override of
-                                          `save_on_switch`)
-        Steps may be given in any order; they are applied in ascending step order,
-        each exactly once.
-    save_on_switch : bool, default True
-        Write a checkpoint whenever a scheduled change is applied. Named
-        `checkpoint-<global_step>` in the usual output dir, so a switch at step
-        400 produces `checkpoint-400`.
-    protect_switch_checkpoints : bool, default True
-        Exclude switch checkpoints from `save_total_limit` rotation so they are
-        not deleted by later routine saves.
-
-    All other args/kwargs are forwarded to `GRPOTrainer` unchanged.
     """
 
     def __init__(
@@ -137,12 +47,10 @@ class ScheduledGRPOTrainer(GRPOTrainer):
         self._protect_switch_checkpoints = protect_switch_checkpoints
         self._protected_checkpoints: set[str] = set()
         self._in_training = False
-        # Apply anything scheduled for step 0 / resumed-past steps right away.
+        # apply anything scheduled for step 0 / resumed-past steps right away.
         self._apply_schedule()
 
-    # ------------------------------------------------------------------ #
-    # Convenience constructor for the common single-switch case.
-    # ------------------------------------------------------------------ #
+    # constructor for the common single-switch case.
     @classmethod
     def with_switch(
         cls,
@@ -172,12 +80,8 @@ class ScheduledGRPOTrainer(GRPOTrainer):
             change["save_checkpoint"] = save_checkpoint
         return cls(*args, schedule=[change], **kwargs)
 
-    # ------------------------------------------------------------------ #
-    # Hooks: check the schedule where epsilon and rewards are actually read.
-    # ------------------------------------------------------------------ #
+    # check the schedule where epsilon and rewards are actually read.
     def train(self, *args, **kwargs):
-        # Guards the checkpoint path: before this there is no optimizer state
-        # worth writing, so step-0 schedule entries must not try to save.
         self._in_training = True
         try:
             return super().train(*args, **kwargs)
@@ -187,7 +91,7 @@ class ScheduledGRPOTrainer(GRPOTrainer):
     def compute_loss(
         self, model, inputs, return_outputs=False, num_items_in_batch=None
     ):
-        # epsilon_low / epsilon_high are read here, once per step.
+        # read epsilon_low / epsilon_high  once per step.
         self._apply_schedule()
         return super().compute_loss(
             model,
@@ -201,16 +105,14 @@ class ScheduledGRPOTrainer(GRPOTrainer):
         self._apply_schedule()
         return super()._generate_and_score_completions(generation_batch)
 
-    # ------------------------------------------------------------------ #
-    # Schedule application.
-    # ------------------------------------------------------------------ #
+    # schedule application.
     def _apply_schedule(self) -> None:
         step = int(self.state.global_step)
         for i, change in enumerate(self._schedule):
             if i in self._applied_schedule_idx:
                 continue
             if step < int(change["step"]):
-                break  # schedule is sorted ascending; nothing further is due
+                break  # schedule is sorted ascending
             self._apply_change(change)
             self._applied_schedule_idx.add(i)
 
@@ -246,34 +148,25 @@ class ScheduledGRPOTrainer(GRPOTrainer):
         if change.get("save_checkpoint", self._save_on_switch):
             self._save_switch_checkpoint(change, applied)
 
-    # ------------------------------------------------------------------ #
-    # Checkpointing at the switch.
-    # ------------------------------------------------------------------ #
+    # checkpointing at the switch.
     def _switch_checkpoint_dir(self) -> str:
         try:
             run_dir = self._get_output_dir(trial=None)
-        except Exception:  # pragma: no cover - very old/new transformers
+        except Exception:
             run_dir = self.args.output_dir
-        return os.path.join(run_dir, f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}")
+        return os.path.join(
+            run_dir, f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
+        )
 
     def _save_switch_checkpoint(self, change: dict, applied: list[str]) -> None:
-        """Write `checkpoint-<global_step>` at the moment a change is applied.
-
-        Called from inside `compute_loss` / `_generate_and_score_completions`,
-        i.e. at the same point in the loop on every rank, so the collective save
-        is safe.
-        """
+        """Write `checkpoint-<global_step>` at the moment a change is applied."""
         if not self._in_training:
-            # Constructed but not training yet (e.g. a step-0 entry applied in
-            # __init__): no optimizer/scheduler state exists to checkpoint.
             return
         if getattr(self, "optimizer", None) is None:
             return
 
         ckpt_dir = self._switch_checkpoint_dir()
 
-        # Don't clobber an existing checkpoint - typically means we resumed from
-        # exactly this step and the change legitimately re-fired.
         if os.path.isdir(ckpt_dir) and os.listdir(ckpt_dir):
             if self.accelerator.is_main_process:
                 print(
@@ -285,13 +178,12 @@ class ScheduledGRPOTrainer(GRPOTrainer):
 
         self.accelerator.wait_for_everyone()
 
-        # `_save_checkpoint` dropped its `metrics` arg in newer transformers.
         save_kwargs: dict[str, Any] = {}
         try:
             params = inspect.signature(self._save_checkpoint).parameters
             if "metrics" in params:
                 save_kwargs["metrics"] = None
-        except (TypeError, ValueError):  # pragma: no cover
+        except (TypeError, ValueError):
             pass
 
         self._save_checkpoint(self.model, None, **save_kwargs)
@@ -303,7 +195,9 @@ class ScheduledGRPOTrainer(GRPOTrainer):
             self._write_switch_info(ckpt_dir, change, applied)
             print(f"[ScheduledGRPOTrainer] saved switch checkpoint -> {ckpt_dir}")
 
-    def _write_switch_info(self, ckpt_dir: str, change: dict, applied: list[str]) -> None:
+    def _write_switch_info(
+        self, ckpt_dir: str, change: dict, applied: list[str]
+    ) -> None:
         """Record what changed, next to the weights, for later archaeology."""
         info = {
             "global_step": int(self.state.global_step),
@@ -319,7 +213,7 @@ class ScheduledGRPOTrainer(GRPOTrainer):
             os.makedirs(ckpt_dir, exist_ok=True)
             with open(os.path.join(ckpt_dir, "switch_info.json"), "w") as f:
                 json.dump(info, f, indent=2)
-        except Exception as e:  # pragma: no cover - metadata is best-effort
+        except Exception as e:
             print(f"[ScheduledGRPOTrainer] could not write switch_info.json: {e}")
 
     def _sorted_checkpoints(
@@ -328,12 +222,7 @@ class ScheduledGRPOTrainer(GRPOTrainer):
         checkpoint_prefix=PREFIX_CHECKPOINT_DIR,
         use_mtime=False,
     ):
-        """Hide switch checkpoints from `save_total_limit` rotation.
-
-        `_rotate_checkpoints` deletes everything past the limit from this list,
-        so filtering here keeps switch checkpoints on disk without duplicating
-        HF's rotation logic.
-        """
+        """Hide switch checkpoints from save_total_limit rotation"""
         checkpoints = super()._sorted_checkpoints(
             output_dir=output_dir,
             checkpoint_prefix=checkpoint_prefix,
@@ -355,14 +244,14 @@ class ScheduledGRPOTrainer(GRPOTrainer):
             reward_funcs = [reward_funcs]
         reward_funcs = list(reward_funcs)
 
-        # Prepare any nn.Module reward models (device placement / DS / FSDP).
+        # prepare any nn.Module reward models
         for i, func in enumerate(reward_funcs):
             if isinstance(func, torch.nn.Module):
                 reward_funcs[i] = self.accelerator.prepare_model(
                     func, evaluation_mode=True, device_placement=True
                 )
 
-        # Derive log-metric names the same way GRPOTrainer does.
+        # derive log-metric names
         names: list[str] = []
         for func in reward_funcs:
             if isinstance(func, torch.nn.Module):
@@ -374,7 +263,7 @@ class ScheduledGRPOTrainer(GRPOTrainer):
             else:
                 names.append(get_callable_name(func))
 
-        # Weights: honor explicit, else reuse existing if count matches, else ones.
+        # handle reward weights
         if reward_weights is not None:
             weights = torch.tensor(list(reward_weights), dtype=torch.float32)
             if len(weights) != len(reward_funcs):
@@ -387,7 +276,6 @@ class ScheduledGRPOTrainer(GRPOTrainer):
         else:
             weights = torch.ones(len(reward_funcs), dtype=torch.float32)
 
-        # Processing classes: honor explicit, else reuse if count matches, else None.
         if reward_processing_classes is not None:
             proc = list(reward_processing_classes)
             if len(proc) != len(reward_funcs):
@@ -405,9 +293,9 @@ class ScheduledGRPOTrainer(GRPOTrainer):
         self.reward_weights = weights
         self.reward_processing_classes = proc
 
-        # Recompute async-func flag if the trainer tracks it (newer TRL).
         if hasattr(self, "_has_async_funcs"):
             tools = getattr(self, "tools", []) or []
             self._has_async_funcs = any(
-                inspect.iscoroutinefunction(f) for f in (self.reward_funcs + list(tools))
+                inspect.iscoroutinefunction(f)
+                for f in (self.reward_funcs + list(tools))
             )

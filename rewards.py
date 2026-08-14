@@ -3,14 +3,12 @@ import re
 
 try:
     import wandb
-except Exception:  # wandb is optional; reward logging is best-effort
+except Exception:   
     wandb = None
 
 from utils import get_completion_text
 
-# Math-equivalence grading. math_verify is the standard tool used across the
-# RLVR literature (handles LaTeX, fractions, sets, etc.). We fall back to a
-# normalized string/float comparison if it isn't installed.
+
 try:
     from math_verify import parse, verify
 
@@ -19,14 +17,9 @@ except Exception:  # pragma: no cover
     _HAS_MATH_VERIFY = False
 
 
-# ---------------------------------------------------------------------------
-# Answer extraction / grading
-# ---------------------------------------------------------------------------
+# answer extraction and grading
 def extract_boxed(text: str) -> str | None:
-    """Return the content of the LAST \\boxed{...} in `text` (balanced braces).
-
-    Qwen2.5-Math emits its final answer as \\boxed{...}; we take the last one
-    to handle "reason, then box" generations.
+    """Return the content of the LAST \\boxed{...} in text
     """
     idx = text.rfind("\\boxed")
     if idx == -1:
@@ -57,9 +50,7 @@ def _normalize(s: str) -> str:
 
 
 def _fast_equal(pred: str, gold: str) -> bool:
-    """Cheap normalized string/float equality. Only trusted for POSITIVE
-    matches — a mismatch here may still be mathematically equal (e.g.
-    '1/2' vs '0.5'), so negatives fall through to math_verify."""
+    """Cheap normalized string/float equality."""
     p, g = _normalize(pred), _normalize(gold)
     if p == g:
         return True
@@ -69,7 +60,7 @@ def _fast_equal(pred: str, gold: str) -> bool:
         return False
 
 
-# --- math_verify worker (runs in subprocesses) ------------------------------
+
 from functools import lru_cache
 
 
@@ -79,9 +70,7 @@ def _parse_cached(expr: str):
 
 
 def _verify_pair(args) -> bool:
-    """(pred, gold_str) -> bool. Runs inside a pool worker; gold parses are
-    cached per worker, which pays off since each prompt's gold is graded
-    num_generations times."""
+    """(pred, gold_str) -> bool."""
     pred, gold_str = args
     try:
         return bool(verify(_parse_cached(gold_str), parse(pred)))
@@ -93,9 +82,7 @@ _POOL = None
 
 
 def _get_pool():
-    """Lazy persistent pool — created once, reused every reward call, so we
-    don't pay process-spawn cost per training cycle. Workers are CPU-only
-    (sympy); they never touch CUDA."""
+    """Lazy persistent pool created once, reused every reward call"""
     global _POOL
     if _POOL is None:
         import multiprocessing as mp
@@ -140,27 +127,19 @@ def is_correct(response: str, gold) -> bool:
 
 
 
-# ---------------------------------------------------------------------------
-# Reward functions
-#
-# Every function returns a list[float] of length len(completions). TRL passes
-# `prompts`, `completions`, and each dataset column (here `answer`) as kwargs.
-# All rewards are binary {0, 1} to mirror the paper.
-# ---------------------------------------------------------------------------
 
-# --- Ground truth (the real signal / upper bound) --------------------------
+
+# gt gsm8k reward
 def ground_truth_reward(prompts, completions, answer, **kwargs):
     """1.0 if the boxed answer is mathematically correct, else 0.0."""
     responses = [get_completion_text(c) for c in completions]
     # extracted = [extract_boxed(r) for r in responses]
     correct = batch_is_correct(responses, answer)
     scores = [1.0 if ok else 0.0 for ok in correct]
-    # _maybe_debug(kwargs, prompts, responses, answer, extracted, scores,
-    #              "GRPO ground_truth")
     return scores
 
 def random_reward(completions, **kwargs):
-    """Bernoulli(0.5) random reward — Park et al. 2509.26114 main setting."""
+    """Bernoulli(0.5) random reward"""
     responses = [get_completion_text(c) for c in completions]
     code_freq = sum("python" in r.lower() for r in responses) / len(responses)
     try:
@@ -172,7 +151,7 @@ def random_reward(completions, **kwargs):
     return [1.0 if random.random() < gamma else 0.0 for _ in completions]
 
 
-# --- Park et al. Appendix C.2 reward-distribution variants -------------------
+
 def random_reward_p03(completions, **kwargs):
     """Bernoulli(0.3) random reward (Park et al., Fig. 4 right)."""
     return [1.0 if random.random() < 0.3 else 0.0 for _ in completions]
@@ -188,7 +167,7 @@ def gaussian_reward(completions, **kwargs):
     return [random.gauss(0.0, 1.0) for _ in completions]
 
 
-# --- GSM8K ground-truth rewards (Park et al. true-reward RLVR, Fig. 5/6) -----
+
 _GSM8K_STRICT_RE = re.compile(r"####\s*(\-?[0-9][0-9\.\,]*)")
 _NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 
@@ -220,10 +199,7 @@ def extract_last_number(text: str) -> str | None:
 
 
 def gsm8k_reward(prompts, completions, answer, **kwargs):
-    """1.0 iff last '#### <number>' matches gold (verl gsm8k 'strict' scorer).
-
-    This is verl's default GSM8K training reward, which Park et al. used with
-    the prompt suffix 'output the final answer after "####"'.
+    """1.0 iff last '#### <number>' matches GT.
     """
     responses = [get_completion_text(c) for c in completions]
     extracted = [extract_gsm8k_strict(r) for r in responses]
@@ -237,9 +213,7 @@ def gsm8k_reward(prompts, completions, answer, **kwargs):
 
 
 def gsm8k_flexible_reward(prompts, completions, answer, **kwargs):
-    """1.0 iff the LAST number in the response matches gold (verl 'flexible';
-    the paper's stated validation criterion: 'string match for the last
-    numerical value')."""
+    """1.0 iff the LAST number in the response matches GT"""
     responses = [get_completion_text(c) for c in completions]
     extracted = [extract_last_number(r) for r in responses]
     scores = [
@@ -250,18 +224,16 @@ def gsm8k_flexible_reward(prompts, completions, answer, **kwargs):
     #              "GRPO gsm8k_flexible")
     return scores
 
-# --- Box-only format reward (rewards formatting, not correctness) ----------
+
 def box_only_format_reward(completions, **kwargs):
     """1.0 if the response contains any \\boxed{...}, else 0.0."""
     responses = [get_completion_text(c) for c in completions]
     return [1.0 if extract_boxed(r) is not None else 0.0 for r in responses]
 
 
-# --- Incorrect reward (negative correlation) -------------------------------
+
 def incorrect_reward(prompts, completions, answer, **kwargs):
     """1.0 iff the model produced a boxed answer that is WRONG.
-
-    No box -> 0.0 (so the model still can't trivially farm reward by stopping).
     """
     responses = [get_completion_text(c) for c in completions]
     extracted = [extract_boxed(r) for r in responses]
@@ -275,26 +247,22 @@ def incorrect_reward(prompts, completions, answer, **kwargs):
     return scores
 
 
-# --- "Mention python" reward (encourages Qwen code-reasoning) --------------
+
 def python_reward(completions, **kwargs):
     """1.0 if the response mentions the word 'python', else 0.0.
-
-    Approximation of the paper's `contain_python_wo_backticks`. Surfaces the
-    Qwen2.5-Math "code reasoning" behaviour that the paper links to the gains.
     """
     responses = [get_completion_text(c) for c in completions]
     return [1.0 if "python" in r.lower() else 0.0 for r in responses]
 
 
-# ---------------------------------------------------------------------------
-# Registry — pick the reward set with --reward on the CLI.
-# ---------------------------------------------------------------------------
+
+
 REWARD_REGISTRY = {
-    "ground_truth": [ground_truth_reward],  # real signal / upper bound (\boxed{})
-    "random": [random_reward],              # Bernoulli(0.5) — Park et al. main
-    "random_p03": [random_reward_p03],      # Bernoulli(0.3) — Park Fig. 4 right
-    "random_p07": [random_reward_p07],      # Bernoulli(0.7) — Park Fig. 4 right
-    "gaussian": [gaussian_reward],          # N(0,1)         — Park Fig. 4 right
+    "ground_truth": [ground_truth_reward],  # gsm8k \boxed{}
+    "random": [random_reward],              # Bernoulli(0.5) 
+    "random_p03": [random_reward_p03],      # Bernoulli(0.3)  
+    "random_p07": [random_reward_p07],      # Bernoulli(0.7) 
+    "gaussian": [gaussian_reward],          # N(0,1)        
     "gsm8k": [gsm8k_reward],                # true reward, verl strict '####'
     "gsm8k_flexible": [gsm8k_flexible_reward],  # true reward, last-number match
     "box_only": [box_only_format_reward],   # spurious: format only

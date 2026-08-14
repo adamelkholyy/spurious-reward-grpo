@@ -4,32 +4,18 @@ from rewards import get_reward_funcs
 from settings import INF_EPS_HIGH, GRPO_CONFIG, HPC
 from tasks import get_task
 from ScheduledGRPOTrainer import ScheduledGRPOTrainer
-from EntropyThermostatGRPOTrainer import EntropyThermostatGRPOTrainer
+
 
 
 class GRPORunner():
 
     def run(self, model, tokenizer, args):
-        # Resolve the dataset task (prompt formatting + rewards + gold/grading
-        # all live in tasks/<name>.py). Adding a dataset needs no changes here.
+        # resolve the dataset task 
         task = get_task(getattr(args, "dataset", "gsm8k"))
-
         ds = task.build_train(tokenizer)
 
-        if getattr(args, "entropy_thermostat", False):
-            reward_name = getattr(args, "thermostat_normal_reward", None)
-            if reward_name is None:
-                raise ValueError(
-                    "--entropy_thermostat requires --thermostat_normal_reward "
-                    "for the ordinary task-training phase"
-                )
-            if getattr(args, "reward", None) is not None:
-                print(
-                    "NOTE: --reward is ignored in thermostat mode; "
-                    f"normal={reward_name}, SR=random"
-                )
-        else:
-            reward_name = task.resolve_reward(getattr(args, "reward", None))
+
+        reward_name = task.resolve_reward(getattr(args, "reward", None))
         task.validate_reward(reward_name)
         reward_funcs = get_reward_funcs(reward_name)
 
@@ -37,50 +23,12 @@ class GRPORunner():
         grpo_args = GRPOConfig(**config)
 
         self.print_config(config)
-        if getattr(args, "entropy_thermostat", False):
-            print(
-                f"Entropy thermostat ON: target={args.thermostat_target}, "
-                f"deadband={args.thermostat_deadband}"
-            )
-        else:
-            print(f"Scheduling switches at step {args.switch_step}" if args.switch_step else "Scheduling OFF")
+        print(f"Scheduling switches at step {args.switch_step}" if args.switch_step else "Scheduling OFF")
         print(f"Running on {'HPC' if HPC else 'FLAMINGO'}")
         print("="*100)
 
-        if getattr(args, "entropy_thermostat", False):
-            if args.switch_step:
-                raise ValueError("--entropy_thermostat and --switch_step are mutually exclusive")
-            if args.thermostat_target is None:
-                raise ValueError("--entropy_thermostat requires --thermostat_target")
-            print(
-                "Thermostat controls raw train/entropy directly "
-                f"(target={args.thermostat_target}, deadband={args.thermostat_deadband})"
-            )
-            if reward_name == "random":
-                raise ValueError(
-                    "--thermostat_normal_reward must be the task reward, not random; "
-                    "the thermostat injects random automatically in SR regions"
-                )
-
-            trainer = EntropyThermostatGRPOTrainer(
-                model=model,
-                processing_class=tokenizer,
-                args=grpo_args,
-                reward_funcs=reward_funcs,
-                sr_reward_funcs=get_reward_funcs("random"),
-                train_dataset=ds,
-                thermostat={
-                    "target": float(args.thermostat_target),
-                    "deadband": float(args.thermostat_deadband),
-                    "ema_alpha": float(args.thermostat_ema_alpha),
-                    "control_interval": int(args.thermostat_interval),
-                    "up_epsilon_low": float(args.thermostat_up_eps_low),
-                    "up_epsilon_high": self._parse_epsilon_high(args.thermostat_up_eps_high),
-                    "down_epsilon_low": float(args.thermostat_down_eps_low),
-                    "down_epsilon_high": self._parse_epsilon_high(args.thermostat_down_eps_high),
-                },
-            )
-        elif args.switch_step: # TODO add multi-scheduling to args
+            
+        if args.switch_step: # TODO add multi-scheduling to args
             trainer = ScheduledGRPOTrainer.with_switch(
                 model=model,
                 args=grpo_args,
@@ -120,7 +68,7 @@ class GRPORunner():
                 print("Qwen-0.5B, increasing memory usage")
 
         if "3b" in args.model.lower():
-            config["vllm_gpu_memory_utilization"] = 0.275 # TEMP CHANGE # could be increased
+            config["vllm_gpu_memory_utilization"] = 0.275  # could be increased
             config["per_device_train_batch_size"] = 4 
             config["gradient_accumulation_steps"] = 16
             print("Qwen-3B, decreasing memory usage")
@@ -172,8 +120,7 @@ class GRPORunner():
 
 
 if __name__ == "__main__":
-    # Minimal smoke test of the scheduling logic (no real training run).
-    # Demonstrates the intended usage without needing a GPU/model.
+    # GRPORunner smoke test
     def reward_phase_a(completions, **kwargs):
         return [float(len(c)) for c in completions]
 
