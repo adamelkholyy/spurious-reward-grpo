@@ -1,3 +1,5 @@
+import os
+
 from trl import GRPOConfig, GRPOTrainer
 
 from rewards import get_reward_funcs
@@ -106,6 +108,13 @@ class GRPORunner():
 
         if args.model == "meta-llama/Llama-3.2-1B-Instruct":
             config["vllm_gpu_memory_utilization"] = 0.40
+
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+        if world_size > 1:
+            ga = config["gradient_accumulation_steps"]
+            assert ga % world_size == 0, f"grad accum {ga} not divisible by {world_size} GPUs"
+            config["gradient_accumulation_steps"] = ga // world_size
+            # if GRPO_CONFIG sets steps_per_generation / generation_batch_size explicitly, scale those too
 
         config["output_dir"] = args.output_dir
         return config

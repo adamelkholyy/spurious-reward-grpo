@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Any, tuple
+from typing import Any
 
 
 def get_completion_text(completion: Any) -> str:

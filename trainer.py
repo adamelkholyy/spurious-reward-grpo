@@ -1,5 +1,5 @@
 import argparse
-
+import os
 import torch
 import wandb
 import logging
@@ -105,20 +105,21 @@ if __name__ == "__main__":
         f"{args.run_name}_low={args.eps_low}_high={args.eps_high}_s{args.seed}"
     )
 
-    run = wandb.init(
-        entity="adamelkholy25-university-of-cambridge",
-        project="dissertation",
-        name=args.run_name,
-        config={
-            "model": args.model,
-            "dataset": args.dataset,
-            "reward": args.reward,
-            "eps_low": args.eps_low,
-            "eps_high": args.eps_high,
-            "max_steps": args.max_steps,
-            "seed": args.seed,
-        },
-    )
+    if int(os.environ.get("RANK", 0)) == 0:
+        run = wandb.init(
+            entity="adamelkholy25-university-of-cambridge",
+            project="dissertation",
+            name=args.run_name,
+            config={
+                "model": args.model,
+                "dataset": args.dataset,
+                "reward": args.reward,
+                "eps_low": args.eps_low,
+                "eps_high": args.eps_high,
+                "max_steps": args.max_steps,
+                "seed": args.seed,
+            },
+        )
 
     args.output_dir = resolve_output_dir(args)
     post_trainer = GRPORunner()
