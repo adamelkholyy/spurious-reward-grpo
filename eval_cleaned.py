@@ -24,6 +24,7 @@ import tempfile
 import time
 
 from tasks import available_tasks, get_task
+from settings import HPC 
 
 BASE_MODELS = {
     "qwen": "Qwen/Qwen2.5-1.5B-Instruct",
@@ -422,7 +423,9 @@ def parse_args():
 
 
 def main():
-    os.chdir("/local/scratch/ae581/zzsp")
+    if not HPC:
+        os.chdir("/local/scratch/ae581/zzsp")
+        
     args = parse_args()
 
     if args.worker_out:
