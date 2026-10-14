@@ -94,6 +94,8 @@ def print_gsm8k_table(
     for (n, temp, n_prob, max_tok), by_label in sorted(
         groups.items(), key=lambda kv: str(kv[0])
     ):
+        if n != 256:
+            continue
         grp = list(by_label.values())
         base_results = {r["label"]: r for r in grp if is_baseline(r)}
         run_results = [r for r in grp if not is_baseline(r)]
@@ -142,9 +144,9 @@ def print_gsm8k_table(
                 f"{r['accuracy'] * 100:.1f}%",
                 f"{r['pass_at_n'] * 100:.1f}%",
             ]
-            for k in k_cols:
-                v = r.get("pass_at_k_unbiased", {}).get(str(k))
-                out.append(f"{v * 100:.1f}%" if v is not None else "--")
+            # for k in k_cols:
+            #     v = r.get("pass_at_k_unbiased", {}).get(str(k))
+            #     out.append(f"{v * 100:.1f}%" if v is not None else "--")
             return out + [d_avg, d_pass]
 
         caption = (
@@ -164,8 +166,8 @@ def _print_ascii(sections, cells, k_cols, n, caption):
     print(caption)
     print("=" * width)
     header = f"{'model':<55}{'avg@n':>10}{f'pass@{n}':>12}"
-    for k in k_cols:
-        header += f"{f'p@{k}(unb)':>12}"
+    # for k in k_cols:
+    #     header += f"{f'p@{k}(unb)':>12}"
     header += f"{'Δavg':>12}{'Δpass':>12}"
     print(header)
     print("-" * width)

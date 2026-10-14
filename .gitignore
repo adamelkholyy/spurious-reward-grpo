@@ -3,10 +3,7 @@ venv/
 outputs/
 runners/__pycache__/
 logs/
-results/
 .gitconfig
-*.json
 *.sh
 settings.py
 tasks/__pycache__/
-eval-outputs/

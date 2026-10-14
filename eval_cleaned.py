@@ -252,7 +252,7 @@ def checkpoint_step(name: str):
     return (int(m.group(1)) if m else -1, name)
 
 
-def discover_models(outputs_dir: str, all_checkpoints=False):
+def discover_models(outputs_dir: str, all_checkpoints=False, dataset_name="gsm8k"):
     """(label, path) for each run under outputs_dir: its latest checkpoint, or all of them."""
     if not os.path.isdir(outputs_dir):
         sys.exit(f"No such directory: {outputs_dir}")
@@ -261,6 +261,8 @@ def discover_models(outputs_dir: str, all_checkpoints=False):
     for name in sorted(os.listdir(outputs_dir)):
         run_dir = os.path.join(outputs_dir, name)
         if not os.path.isdir(run_dir):
+            continue
+        if dataset_name not in run_dir:
             continue
         checkpoints = sorted(
             (c for c in os.listdir(run_dir) if is_model_dir(os.path.join(run_dir, c))),
@@ -283,6 +285,8 @@ def discover_models(outputs_dir: str, all_checkpoints=False):
         for checkpoint in checkpoints:
             label = f"{base}-{checkpoint_step(checkpoint)[0]}" if all_checkpoints else base
             pairs.append((label, os.path.join(run_dir, checkpoint)))
+    for p in pairs:
+        print(p)
     return pairs
 
 
@@ -298,7 +302,7 @@ def collect_pairs(args):
                 sys.exit(f"Label '{label}' is reserved for the base model")
             pairs.append((label, path))
     else:
-        pairs = discover_models(args.outputs_dir, args.all_checkpoints)
+        pairs = discover_models(args.outputs_dir, args.all_checkpoints, args.dataset)
         for i, (label, path) in enumerate(pairs):
             if label in BASE_MODELS:
                 new = f"{label}_run"
@@ -441,6 +445,7 @@ def main():
 
     baseline_cache = load_json(args.baseline_cache, {})
     by_key = {r["eval_config"]: r for r in load_json(args.out, [])}
+    print(baseline_cache)
 
     total = len(pairs)
     print(f"Evaluating {total} model(s)...")
@@ -478,3 +483,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+    #### TODO: sort out countdown4 vs countdown naming discrepancy. , fix eval_outdist.py, read papers make notes. 
