@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
-"""
-Compares one or more models (e.g. the base model vs GRPO ground-truth
-checkpoint) using the SAME prompt and \\boxed{} grading as training. Generation
-runs through vLLM; each model is evaluated in a fresh subprocess so the GPU is
-released between models
+"""Benchmark one or more models with the same prompt and grading used in training.
+
+Generation runs through vLLM. Each model is evaluated in a fresh subprocess so
+the GPU is fully released between models. Results are appended to a persistent
+JSON file; models already evaluated under an identical config are reused.
+
+Typical usage:
+    python eval.py --dataset gsm8k                       # scan outputs/ + baselines
+    python eval.py --models run1=outputs/run1 --n 32     # explicit models
+
+pass@k for k < n can be recomputed afterwards from `per_example[*].n_correct`
+in the results file.
 """
 
 import argparse
 import json
-import math
+import multiprocessing as mp
 import os
 import re
 import subprocess
 import sys
 import tempfile
 import time
+
+from tasks import available_tasks, get_task
+from settings import HPC 
 
 BASE_MODELS = {
     "qwen": "Qwen/Qwen2.5-1.5B-Instruct",
@@ -25,56 +35,58 @@ BASE_MODELS = {
 }
 
 RESULTS_DIR = "results"
-
-from tasks import available_tasks, get_task  # noqa: E402
-
-_ACTIVE_DATASET = "gsm8k"
+MAX_MODEL_LEN = 4096
+GPU_MEM = 0.9
 
 
-def _task():
-    return get_task(_ACTIVE_DATASET)
+def load_json(path: str, default):
+    if not os.path.exists(path):
+        return default
+    with open(path) as f:
+        return json.load(f)
 
 
-DISABLED_FILE = "results/.disabled_models.json"
-
-disabled = set()
-if os.path.exists(DISABLED_FILE):
-    with open(DISABLED_FILE) as f:
-        disabled = set(json.load(f))
+def effective_limit(task) -> int:
+    return 500 if task.eval_split == task.train_split else 50000
 
 
-def build_prompts(problems, tokenizer):
-    """Apply the active task's eval prompt (chat template, ChatML fallback).
-
-    Returns (prompts, template_used) where template_used is
-    "tokenizer_chat_template" or "chatml_fallback".
-    """
-    return _task().build_eval_prompts(problems, tokenizer)
-
-
-# answer extraction + grading
-def gsm8k_gold(answer_field: str) -> str:
-    """Normalise a raw gold answer via the active task (name kept for callers)."""
-    return _task().extract_gold(answer_field)
-
-
-def last_boxed(text: str):
-    """Extract the model's final answer via the active task (for display)."""
-    return _task().extract_answer(text)
+def get_baseline_key(label: str):
+    lbl = label.lower()
+    if "llama" in lbl:
+        return "llama"
+    if "olmo" in lbl:
+        return "olmo"
+    if "qwen" in lbl:
+        if "small" in lbl:
+            return "qwen-small"
+        if "3b" in lbl:
+            return "qwen3b"
+        return "qwen"
+    return None
 
 
-def make_grader():
-    """Return the active task's is_correct(completion, gold) grader."""
-    return _task().make_grader()
+def eval_config_key(model_path: str, args) -> str:
+    task = get_task(args.dataset)
+    cfg = {
+        "dataset": task.eval_dataset_id(),
+        "model": model_path,
+        "n": args.n,
+        "temperature": args.temperature,
+        "max_tokens": args.max_tokens,
+        "max_model_len": MAX_MODEL_LEN,
+        "limit": effective_limit(task),
+        "pass_k": [],  # unused; kept so existing cache entries stay valid
+    }
+    return json.dumps(cfg, sort_keys=True)
+
 
 
 _POOL_GRADER = None
 
 
-def _pool_grader_init(dataset_name):
-    global _ACTIVE_DATASET, _POOL_GRADER
-    _ACTIVE_DATASET = dataset_name
-    _POOL_GRADER = make_grader()
+def _pool_init(dataset_name):
+    global _POOL_GRADER
+    _POOL_GRADER = get_task(dataset_name).make_grader()
 
 
 def _pool_grade_job(job):
@@ -82,58 +94,60 @@ def _pool_grade_job(job):
     return [_POOL_GRADER(t, gold) for t in texts]
 
 
-def unbiased_pass_at_k(n: int, c: int, k: int) -> float:
-    if n - c < k:
-        return 1.0
-    return 1.0 - math.prod(1.0 - k / i for i in range(n - c + 1, n + 1))
+def grade_all(jobs, args, progress_prefix):
+    from tqdm import tqdm
+
+    desc = f"{progress_prefix}: grading"
+    workers = min(8, os.cpu_count() or 1)
+
+    if workers > 1 and len(jobs) > 32:
+        with mp.get_context("spawn").Pool(
+            workers, initializer=_pool_init, initargs=(args.dataset,)
+        ) as pool:
+            return list(
+                tqdm(
+                    pool.imap(_pool_grade_job, jobs, chunksize=16),
+                    total=len(jobs),
+                    desc=desc,
+                    unit="prob",
+                )
+            )
+
+    is_correct = get_task(args.dataset).make_grader()
+    return [
+        [is_correct(t, gold) for t in texts]
+        for texts, gold in tqdm(jobs, desc=desc, unit="prob", disable=args.n == 1)
+    ]
 
 
-def resolve_pass_ks(n: int, requested):
-    """k values for the unbiased estimator"""
-    return sorted(set((requested or []) + [n]))
 
-
-def _effective_limit(task, args) -> int:
-    if args.limit is not None:
-        return args.limit
-    return 500 if task.eval_split == task.train_split else 50000
-
-
-# worker: evaluate ONE model in this process, write JSON, exit
 def run_one(args):
-
     from tqdm import tqdm
     from transformers import AutoTokenizer
     from vllm import LLM, SamplingParams
 
-    global _ACTIVE_DATASET
-    _ACTIVE_DATASET = args.dataset
-    task = _task()
+    task = get_task(args.dataset)
+    prefix = f"[{args.model_idx}/{args.total_models}] {args.label}"
 
-    problems, golds = task.load_eval(split=None, limit=_effective_limit(task, args))
+    problems, golds = task.load_eval(split=None, limit=effective_limit(task))
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    prompts, template_used = build_prompts(problems, tokenizer)
-    if template_used == "chatml_fallback":
-        print(
-            f"[{args.label}] tokenizer has no chat template — using explicit "
-            f"ChatML fallback (intentional, see header comment)."
-        )
-
-    llm = LLM(
-        model=args.model,
-        dtype="bfloat16",
-        gpu_memory_utilization=args.gpu_mem,
-        max_model_len=args.max_model_len,
-        enable_prefix_caching=True,
-        seed=0,
-    )
+    prompts, template_used = task.build_eval_prompts(problems, tokenizer)
 
     stop = None
     if template_used == "chatml_fallback":
         stop = ["<|im_end|>", "<|im_start|>", "\nQuestion:", "\nProblem:"]
+        print(f"[{args.label}] tokenizer has no chat template — using ChatML fallback.")
 
-    sp = SamplingParams(
+    llm = LLM(
+        model=args.model,
+        dtype="bfloat16",
+        gpu_memory_utilization=GPU_MEM,
+        max_model_len=MAX_MODEL_LEN,
+        enable_prefix_caching=True,
+        seed=0,
+    )
+    sampling = SamplingParams(
         n=args.n,
         temperature=args.temperature,
         top_p=1.0,
@@ -142,100 +156,49 @@ def run_one(args):
         seed=0,
     )
 
-    t0 = time.time()
+    def tqdm_with_desc(*a, **kw):
+        kw["desc"] = f"{prefix}: processing prompts"
+        return tqdm(*a, **kw)
 
-    bar_desc = (
-        f"[{args.model_idx}/{args.total_models}] " f"{args.label}: processing prompts"
-    )
+    t0 = time.perf_counter()
+    outputs = llm.generate(prompts, sampling, use_tqdm=tqdm_with_desc)
+    gen_s = time.perf_counter() - t0
 
-    def _tqdm_factory(*fa, **fkw):
-        fkw["desc"] = bar_desc
-        return tqdm(*fa, **fkw)
-
-    outputs = llm.generate(prompts, sp, use_tqdm=_tqdm_factory)
-    gen_s = time.time() - t0
-
-    t0 = time.time()
-
-    pass_ks = resolve_pass_ks(args.n, args.pass_k)
-
-    # grade in parallel
+    t0 = time.perf_counter()
     jobs = [([o.text for o in out.outputs], golds[i]) for i, out in enumerate(outputs)]
-    workers = args.grade_workers or min(8, os.cpu_count() or 1)
-    if workers > 1 and len(jobs) > 32:
-        import multiprocessing as mp
-
-        with mp.get_context("spawn").Pool(
-            workers, initializer=_pool_grader_init, initargs=(args.dataset,)
-        ) as pool:
-            all_flags = list(
-                tqdm(
-                    pool.imap(_pool_grade_job, jobs, chunksize=16),
-                    total=len(jobs),
-                    desc=f"[{args.model_idx}/{args.total_models}] {args.label}: grading",
-                    unit="prob",
-                )
-            )
-    else:
-        is_correct = make_grader()
-        all_flags = [
-            [is_correct(t, gold) for t in texts]
-            for texts, gold in tqdm(
-                jobs,
-                desc=f"[{args.model_idx}/{args.total_models}] {args.label}: grading",
-                unit="prob",
-                disable=args.n == 1,
-            )
-        ]
+    all_flags = grade_all(jobs, args, prefix)
 
     per_example = []
-    correct_avg = 0.0
-    correct_pass = 0
+    sum_avg = 0.0
+    n_any_correct = 0
     n_truncated = 0
-    pass_k_sums = {k: 0.0 for k in pass_ks}
 
-    for ex_i, out in enumerate(outputs):
-        sample_flags = all_flags[ex_i]
-        n_truncated += sum(1 for o in out.outputs if o.finish_reason == "length")
+    for i, (out, flags) in enumerate(zip(outputs, all_flags)):
+        n_truncated += sum(o.finish_reason == "length" for o in out.outputs)
+        n_correct = sum(flags)
+        avg = n_correct / len(flags)
 
-        n_samples = len(sample_flags)
-        n_correct = sum(sample_flags)
-        avg = n_correct / n_samples
-        passed = n_correct > 0
+        sum_avg += avg
+        n_any_correct += n_correct > 0
 
-        correct_avg += avg
-        correct_pass += int(passed)
-        for k in pass_ks:
-            pass_k_sums[k] += unbiased_pass_at_k(n_samples, n_correct, k)
-
+        first = out.outputs[0]
         per_example.append(
             {
-                "index": ex_i,
-                "gold": str(golds[ex_i]),
+                "index": i,
+                "gold": str(golds[i]),
                 "n_correct": n_correct,
                 "avg_correct": avg,
-                "pass": passed,
-                "pred_boxed": last_boxed(out.outputs[0].text),
-                "completion_len_chars": len(out.outputs[0].text),
-                "finish_reason": out.outputs[0].finish_reason,
+                "pass": n_correct > 0,
+                "pred_boxed": task.extract_answer(first.text),
+                "completion_len_chars": len(first.text),
+                "finish_reason": first.finish_reason,
             }
         )
-
-    grade_s = time.time() - t0
+    grade_s = time.perf_counter() - t0
 
     n_prob = len(problems)
-    accuracy = correct_avg / n_prob
-    pass_at_n = correct_pass / n_prob
-    total_samples = n_prob * args.n
-    truncated_frac = n_truncated / total_samples if total_samples else 0.0
-    if truncated_frac > 0.05:
-        print(
-            f"[{args.label}] WARNING: {truncated_frac:.0%} of completions "
-            f"hit max_tokens={args.max_tokens}. If this is a real "
-            f"(non-rambling) model, raise --max-tokens; scores may be "
-            f"depressed by truncation.",
-            file=sys.stderr,
-        )
+    accuracy = sum_avg / n_prob
+    truncated_frac = n_truncated / (n_prob * args.n) if n_prob else 0.0
 
     result = {
         "label": args.label,
@@ -246,10 +209,7 @@ def run_one(args):
         "temperature": args.temperature,
         "max_tokens": args.max_tokens,
         "accuracy": round(accuracy, 4),
-        "pass_at_n": round(pass_at_n, 4),
-        "pass_at_k_unbiased": {
-            str(k): round(pass_k_sums[k] / n_prob, 4) for k in pass_ks
-        },
+        "pass_at_n": round(n_any_correct / n_prob, 4),
         "truncated_frac": round(truncated_frac, 4),
         "gen_seconds": round(gen_s, 1),
         "grade_seconds": round(grade_s, 1),
@@ -260,290 +220,65 @@ def run_one(args):
     print(
         f"[{args.label}] accuracy = {accuracy:.4f}  ({n_prob} problems, "
         f"n={args.n}, T={args.temperature})  "
-        f"[gen {gen_s:.0f}s, grade {grade_s:.0f}s, "
-        f"truncated {truncated_frac:.1%}]"
+        f"[gen {gen_s:.0f}s, grade {grade_s:.0f}s, truncated {truncated_frac:.1%}]"
     )
 
 
-def _is_model_dir(d: str) -> bool:
-    if not os.path.isdir(d):
-        return False
+def is_model_dir(d: str) -> bool:
     try:
         files = os.listdir(d)
     except OSError:
         return False
-    return "config.json" in files and any(
-        f.endswith((".safetensors", ".bin")) for f in files
-    )
+    return "config.json" in files and any(f.endswith((".safetensors", ".bin")) for f in files)
 
 
-def _checkpoints(run_dir: str):
-    ckpts = []
-    for name in os.listdir(run_dir):
-        m = re.fullmatch(r"checkpoint-(\d+)", name)
-        path = os.path.join(run_dir, name)
-        if m and _is_model_dir(path):
-            ckpts.append((int(m.group(1)), path))
-    return sorted(ckpts)
+def checkpoint_step(name: str):
+    """sort key: numeric step from a trailing integer (checkpoint-300 -> 300)."""
+    m = re.search(r"(\d+)$", name)
+    return (int(m.group(1)) if m else -1, name)
 
 
-def discover_models(outputs_dir: str, tag: str = None):
+def discover_models(outputs_dir: str, all_checkpoints=False, dataset_name="gsm8k"):
+    """(label, path) for each run under outputs_dir: its latest checkpoint, or all of them."""
     if not os.path.isdir(outputs_dir):
         sys.exit(f"No such directory: {outputs_dir}")
 
-    pairs = []
+    seen, pairs = {}, []
     for name in sorted(os.listdir(outputs_dir)):
         run_dir = os.path.join(outputs_dir, name)
         if not os.path.isdir(run_dir):
             continue
-        label = re.sub(r"-\d{8,}$", "", name)
-        if tag is not None and tag not in name:
+        if dataset_name not in run_dir:
             continue
-        if _ACTIVE_DATASET != "gsm8k":
-            # aliases
-            alias = {"countdown4": "countdown", "aime2024": "dapo"}.get(
-                _ACTIVE_DATASET, _ACTIVE_DATASET
-            )
-            if alias not in label and alias not in name:
-                print(f"{label} does not match dataset {alias}, skipping")
-                continue
-        else:
-            if (
-                "countdown" in label
-                or "dapo" in label
-                or "mbpp" in label
-                or "wordle" in label
-            ):
-                print(f"{label} does not match gsm8k, skipping")
-                continue
-        if label in disabled or name in disabled:
-            print(f"{label} is disabled, skipping")
-            continue
-        if _is_model_dir(run_dir):
-            pairs.append((label, run_dir))
-            continue
-        ckpts = _checkpoints(run_dir)
-        if not ckpts:
-            continue
-        if len(ckpts) > 1:
-            if tag is not None:
-                step, path = ckpts[-1]
-                pairs.append((f"{label}_chk={step}", path))
-            else:
-                pairs.extend((f"{label}_chk={step}", path) for step, path in ckpts)
-        else:
-            pairs.append((label, ckpts[0][1]))
-    seen, uniq = {}, []
-    for label, path in pairs:
-        if label in seen:
-            seen[label] += 1
-            label = f"{label}_{seen[label]}"
-        else:
-            seen[label] = 0
-        uniq.append((label, path))
-    return uniq
-
-
-def get_baseline_key(label):
-    """Map a run label to its base-model family (or None)."""
-    lbl = label.lower()
-    if "llama" in lbl:
-        return "llama"
-    if "olmo" in lbl:
-        return "olmo"
-    if "qwen" in lbl:
-        if "small" in lbl:
-            return "qwen-small"
-        elif "3b" in lbl:
-            return "qwen3b"
-        return "qwen"
-    return None
-
-
-def _baseline_cache_key(model_path: str, args) -> str:
-    task = get_task(args.dataset)
-    cfg = {
-        "dataset": task.eval_dataset_id(),
-        "model": model_path,
-        "n": args.n,
-        "temperature": args.temperature,
-        "max_tokens": args.max_tokens,
-        "max_model_len": args.max_model_len,
-        "limit": _effective_limit(task, args),
-        "pass_k": sorted(args.pass_k) if args.pass_k else [],
-    }
-    return json.dumps(cfg, sort_keys=True)
-
-
-def _load_baseline_cache(path: str) -> dict:
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path) as f:
-            cache = json.load(f)
-        return cache if isinstance(cache, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        print(
-            f"WARNING: baseline cache {path} unreadable — ignoring it.", file=sys.stderr
+        checkpoints = sorted(
+            (c for c in os.listdir(run_dir) if is_model_dir(os.path.join(run_dir, c))),
+            key=checkpoint_step,
         )
-        return {}
+        if not checkpoints:
+            print(f"{run_dir}: no model checkpoints found, skipping")
+            continue
+        if not all_checkpoints:
+            checkpoints = checkpoints[-1:]
+
+        # one label per run (deduped across runs); checkpoints add a step suffix.
+        base = re.sub(r"-\d{8,}$", "", name)  # strip trailing timestamp
+        if base in seen:
+            seen[base] += 1
+            base = f"{base}_{seen[base]}"
+        else:
+            seen[base] = 0
+        for checkpoint in checkpoints:
+            label = f"{base}-{checkpoint_step(checkpoint)[0]}" if all_checkpoints else base
+            pairs.append((label, os.path.join(run_dir, checkpoint)))
+    for p in pairs:
+        print(p)
+    return pairs
 
 
-def _load_results_file(path: str) -> list:
-    """Load the persistent results file (a JSON list); [] if absent/bad."""
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            return data
-    except (OSError, json.JSONDecodeError):
-        pass
-    print(
-        f"WARNING: results file {path} unreadable or not a list — "
-        f"starting fresh (it will be overwritten).",
-        file=sys.stderr,
-    )
-    return []
-
-
-def main():
-    ap = argparse.ArgumentParser(description="Benchmark models on a dataset.")
-    ap.add_argument(
-        "--dataset",
-        choices=available_tasks(),
-        default="gsm8k",
-        help="dataset task to benchmark (tasks/<name>.py)",
-    )
-    ap.add_argument(
-        "--models",
-        nargs="+",
-        default=None,
-        help="label=path pairs, e.g. run1=outputs/ckpt-300.",
-    )
-    ap.add_argument(
-        "--outputs-dir",
-        dest="outputs_dir",
-        default="outputs",
-        help="directory scanned when --models is omitted (default: outputs/)",
-    )
-    ap.add_argument(
-        "--skip-baselines",
-        action="store_true",
-        help="do not automatically evaluate base models.",
-    )
-    ap.add_argument(
-        "--refresh-baselines",
-        dest="refresh_baselines",
-        action="store_true",
-        help="re-evaluate baselines even if cached results exist",
-    )
-    ap.add_argument(
-        "--baseline-cache",
-        dest="baseline_cache",
-        default=None,
-        help="where cached baseline results live (default: "
-        f"{RESULTS_DIR}/.<dataset>_baseline_cache.json)",
-    )
-    ap.add_argument("--n", type=int, default=32)
-    ap.add_argument("--temperature", type=float, default=1.0)
-    ap.add_argument(
-        "--pass-k",
-        dest="pass_k",
-        type=int,
-        nargs="*",
-        default=None,
-        help="Extra k values for the unbiased pass@k estimator",
-    )
-    ap.add_argument(
-        "--max-tokens",
-        dest="max_tokens",
-        type=int,
-        default=1024,
-        help="generation cap per sample (default 1024)",
-    )
-    ap.add_argument(
-        "--grade-workers",
-        dest="grade_workers",
-        type=int,
-        default=0,
-        help="CPU processes for parallel grading "
-        "(0 = auto: min(8, cpu_count); 1 = in-process).",
-    )
-    ap.add_argument("--max-model-len", dest="max_model_len", type=int, default=4096)
-    ap.add_argument("--gpu-mem", dest="gpu_mem", type=float, default=0.9)
-    ap.add_argument("--limit", type=int, default=None, help="max problems to evaluate")
-    ap.add_argument(
-        "--out",
-        default=None,
-        help="persistent results file. Models already evaluated "
-        "under the same config are skipped and reused; new "
-        "results are appended (default: "
-        f"{RESULTS_DIR}/results_<dataset>.json)",
-    )
-    ap.add_argument(
-        "--force",
-        action="store_true",
-        help="re-evaluate models even if a result with the same "
-        "config already exists in the results file.",
-    )
-
-    # internal worker flags (not for direct use)
-    ap.add_argument(
-        "--worker-out", dest="worker_out", default=None, help=argparse.SUPPRESS
-    )
-    ap.add_argument("--model", default=None, help=argparse.SUPPRESS)
-    ap.add_argument("--label", default=None, help=argparse.SUPPRESS)
-    ap.add_argument(
-        "--model-idx", dest="model_idx", default="?", help=argparse.SUPPRESS
-    )
-    ap.add_argument(
-        "--total-models", dest="total_models", default="?", help=argparse.SUPPRESS
-    )
-    ap.add_argument(
-        "--tag",
-        default=None,
-        help="only evaluate discovered runs whose folder name "
-        "contains this substring",
-    )
-    args = ap.parse_args()
-
-    global _ACTIVE_DATASET
-    _ACTIVE_DATASET = args.dataset
-
-    if args.worker_out:
-        run_one(args)
-        return
-
-    # if args.n == 256:
-    #     args.skip_baselines = True
-
-    if args.out is None:
-        args.out = os.path.join(RESULTS_DIR, f"results_{args.dataset}.json")
-    if args.baseline_cache is None:
-        args.baseline_cache = os.path.join(
-            RESULTS_DIR, f".{args.dataset}_baseline_cache.json"
-        )
-    for p in (args.out, args.baseline_cache):
-        d = os.path.dirname(p)
-        if d:
-            os.makedirs(d, exist_ok=True)
-
-    if args.n > 1 and args.temperature == 0.0:
-        print(
-            "WARNING: --n > 1 with temperature 0 gives identical samples. "
-            "Set --temperature > 0 for a meaningful avg@n.",
-            file=sys.stderr,
-        )
-
-    if args.pass_k:
-        bad = [k for k in args.pass_k if k < 1 or k > args.n]
-        if bad:
-            sys.exit(f"--pass-k values must be in [1, n={args.n}]; got {bad}")
-
-    pairs = []
+def collect_pairs(args):
+    """return (pairs, baseline_labels) of models to evaluate."""
     if args.models:
+        pairs = []
         for m in args.models:
             if "=" not in m:
                 sys.exit(f"Bad --models entry '{m}', expected label=path")
@@ -552,237 +287,182 @@ def main():
                 sys.exit(f"Label '{label}' is reserved for the base model")
             pairs.append((label, path))
     else:
-        pairs = discover_models(args.outputs_dir, tag=args.tag)
-        if args.tag and not pairs:
-            sys.exit(f"No runs in {args.outputs_dir} match tag " f"'{args.tag}'.")
-
-        renamed = []
+        pairs = discover_models(args.outputs_dir, args.all_checkpoints, args.dataset)
         for i, (label, path) in enumerate(pairs):
             if label in BASE_MODELS:
-                pairs[i] = (f"{label}_run", path)
-                renamed.append((label, f"{label}_run"))
-        for old, new in renamed:
-            print(
-                f"NOTE: discovered run '{old}' renamed to '{new}' "
-                f"(label reserved for baseline)."
-            )
+                new = f"{label}_run"
+                print(f"NOTE: discovered run '{label}' renamed to '{new}' (label reserved for baseline).")
+                pairs[i] = (new, path)
         if not pairs and args.skip_baselines:
             sys.exit("No models found and baselines skipped.")
 
     baseline_labels = set()
     if not args.skip_baselines:
-        existing_paths = {p for _, p in pairs}
         if pairs:
-            needed = {get_baseline_key(lbl) for lbl, _ in pairs}
-            needed.discard(None)
+            needed = {get_baseline_key(lbl) for lbl, _ in pairs} - {None}
         else:
             needed = set(BASE_MODELS)
-        skipped = [b for b in BASE_MODELS if b not in needed]
-        if skipped:
-            print(
-                f"Skipping unneeded baseline(s): {', '.join(skipped)} "
-                f"(no run in this sweep maps to them)."
-            )
+        unneeded = [b for b in BASE_MODELS if b not in needed]
+        if unneeded:
+            print(f"Skipping unneeded baseline(s): {', '.join(unneeded)} (no run in this sweep maps to them).")
+
+        existing_paths = {p for _, p in pairs}
         for base_label, base_path in BASE_MODELS.items():
-            if base_label not in needed:
-                continue
-            if base_path in existing_paths:
-                continue
-            pairs.insert(0, (base_label, base_path))
-            baseline_labels.add(base_label)
+            if base_label in needed and base_path not in existing_paths:
+                pairs.insert(0, (base_label, base_path))
+                baseline_labels.add(base_label)
+    return pairs, baseline_labels
 
-    baseline_cache = _load_baseline_cache(args.baseline_cache)
 
-    prior = _load_results_file(args.out)
-    by_key, legacy = {}, []
-    for r in prior:
-        k = r.get("eval_config")
-        if k:
-            by_key[k] = r
+# parent process: orchestration
+def evaluate_in_subprocess(label, path, idx, total, args) -> dict:
+    """run the worker for one model and return its result dict."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+    tmp.close()
+    cmd = [
+        sys.executable, os.path.abspath(__file__),
+        "--worker-out", tmp.name,
+        "--dataset", args.dataset,
+        "--model", path,
+        "--label", label,
+        "--model-idx", str(idx),
+        "--total-models", str(total),
+        "--n", str(args.n),
+        "--temperature", str(args.temperature),
+        "--max-tokens", str(args.max_tokens),
+    ]  
+
+    print(f"\n=== [{idx}/{total}] Evaluating '{label}'  ({path}) ===", flush=True)
+    try:
+        rc = subprocess.run(cmd).returncode
+        if rc != 0:
+            sys.exit(f"Worker for '{label}' failed (exit {rc}). Partial results saved to {args.out}.")
+        with open(tmp.name) as f:
+            return json.load(f)
+    finally:
+        os.unlink(tmp.name)
+
+
+def print_table(results, args):
+    base_results = {r["label"]: r for r in results if r["is_baseline"]}
+    run_results = [r for r in results if not r["is_baseline"]]
+    width = 101
+
+    print("\n" + "=" * width)
+    print(f"{args.dataset} results   (n={args.n}, T={args.temperature}, {results[0]['n_problems']} problems)")
+    print("=" * width)
+    print(f"{'model':<55}{'avg@n':>10}{f'pass@{args.n}':>12}{'Δavg':>12}{'Δpass':>12}")
+    print("-" * width)
+
+    def fmt_row(r, d_avg, d_pass):
+        label = r["label"] if len(r["label"]) <= 54 else r["label"][:51] + "..."
+        row = f"{label:<55}{r['accuracy'] * 100:>9.1f}%{r['pass_at_n'] * 100:>11.1f}%"
+        return row + f"{d_avg:>12}{d_pass:>12}"
+
+    for b_label in BASE_MODELS:
+        if b_label in base_results:
+            print(fmt_row(base_results[b_label], "+0.0pp", "+0.0pp"))
+    if base_results and run_results:
+        print("-" * width)
+
+    for r in run_results:
+        base = base_results.get(get_baseline_key(r["label"]))
+        if base:
+            d_avg = f"{(r['accuracy'] - base['accuracy']) * 100:+.1f}pp"
+            d_pass = f"{(r['pass_at_n'] - base['pass_at_n']) * 100:+.1f}pp"
         else:
-            legacy.append(r)
+            d_avg = d_pass = "--"
+            if base_results:
+                print(
+                    f"NOTE: '{r['label']}' matched no baseline "
+                    f"(label contains none of: {', '.join(BASE_MODELS)}) — deltas omitted."
+                )
+        print(fmt_row(r, d_avg, d_pass))
+    print("=" * width)
 
-    total_models = len(pairs)
-    print(f"Evaluating {total_models} model(s)...")
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="Benchmark models on a dataset.")
+    ap.add_argument("--dataset", choices=available_tasks(), default="gsm8k",
+                    help="dataset task to benchmark (tasks/<name>.py)")  
+    ap.add_argument("--models", nargs="+", default=None,
+                    help="label=path pairs, e.g. run1=outputs/ckpt-300.")  
+    ap.add_argument("--outputs-dir", dest="outputs_dir", default="outputs",
+                    help="directory scanned when --models is omitted (default: outputs/)")  
+    ap.add_argument("--skip-baselines", action="store_true",
+                    help="do not automatically evaluate base models.")  
+    ap.add_argument("--refresh-baselines", dest="refresh_baselines", action="store_true",
+                    help="re-evaluate baselines even if cached results exist")  
+    ap.add_argument("--n", type=int, default=32, help="samples per problem")
+    ap.add_argument("--temperature", type=float, default=1.0)
+    ap.add_argument("--max-tokens", dest="max_tokens", type=int, default=1024,
+                    help="generation cap per sample (default 1024)")  
+    ap.add_argument("--all-checkpoints", "--all_checkpoints", dest="all_checkpoints", action="store_true",
+                    help="eval all checkpoints of each run, not just the latest")  
+
+    # internal worker flags (set by the parent process; not for direct use).
+    ap.add_argument("--worker-out", dest="worker_out", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--model", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--label", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--model-idx", dest="model_idx", default="?", help=argparse.SUPPRESS)
+    ap.add_argument("--total-models", dest="total_models", default="?", help=argparse.SUPPRESS)
+    return ap.parse_args()
+
+
+def main():
+    if not HPC:
+        os.chdir("/local/scratch/ae581/zzsp")
+        
+    args = parse_args()
+
+    if args.worker_out:
+        run_one(args)
+        return
+
+    args.out = os.path.join(RESULTS_DIR, f"results_{args.dataset}.json")
+    args.baseline_cache = os.path.join(RESULTS_DIR, f".{args.dataset}_baseline_cache.json")
+    for p in (args.out, args.baseline_cache):
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+
+    pairs, baseline_labels = collect_pairs(args)
+
+    baseline_cache = load_json(args.baseline_cache, {})
+    by_key = {r["eval_config"]: r for r in load_json(args.out, [])}
+    print(baseline_cache)
+
+    total = len(pairs)
+    print(f"Evaluating {total} model(s)...")
 
     results = []
-    for m_idx, (label, path) in enumerate(pairs, start=1):
+    for idx, (label, path) in enumerate(pairs, start=1):
         is_base = label in baseline_labels
-        key = _baseline_cache_key(path, args)
-        pos = f"{m_idx}/{total_models}"
+        key = eval_config_key(path, args)
+        header = f"\n=== [{idx}/{total}] '{label}' ({path}) — "
 
-        # already in the results file e
-        if not args.force and key in by_key:
+        if key in by_key:
             r = dict(by_key[key])
-            r["label"] = label
-            print(
-                f"\n=== [{pos}] '{label}' ({path}) — already in {args.out}, "
-                f"reusing (--force to re-evaluate) ==="
-            )
+            print(f"{header}already in {args.out}, reusing ===")
             print(f"[{label}] accuracy = {r['accuracy']:.4f}  (from file)")
-        # baseline with cached result
         elif is_base and not args.refresh_baselines and key in baseline_cache:
             r = dict(baseline_cache[key])
-            r["label"] = label
-            print(
-                f"\n=== [{pos}] '{label}' ({path}) — using cached baseline "
-                f"result (--refresh-baselines to re-run) ==="
-            )
+            print(f"{header}using cached baseline (--refresh-baselines to re-run) ===")
             print(f"[{label}] accuracy = {r['accuracy']:.4f}  (cached)")
-        #  else evaluate
         else:
-            tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
-            tmp.close()
-            cmd = [
-                sys.executable,
-                os.path.abspath(__file__),
-                "--worker-out",
-                tmp.name,
-                "--dataset",
-                args.dataset,
-                "--model",
-                path,
-                "--label",
-                label,
-                "--model-idx",
-                str(m_idx),
-                "--total-models",
-                str(total_models),
-                "--n",
-                str(args.n),
-                "--temperature",
-                str(args.temperature),
-                "--max-tokens",
-                str(args.max_tokens),
-                "--max-model-len",
-                str(args.max_model_len),
-                "--gpu-mem",
-                str(args.gpu_mem),
-                "--grade-workers",
-                str(args.grade_workers),
-            ]
-            if args.limit is not None:
-                cmd += ["--limit", str(args.limit)]
-            if args.pass_k:
-                cmd += ["--pass-k"] + [str(k) for k in args.pass_k]
-            print(f"\n=== [{pos}] Evaluating '{label}'  ({path}) ===", flush=True)
-            try:
-                rc = subprocess.run(cmd).returncode
-                if rc != 0:
-                    sys.exit(
-                        f"Worker for '{label}' failed (exit {rc}). "
-                        f"Partial results saved to {args.out}."
-                    )
-                with open(tmp.name) as f:
-                    r = json.load(f)
-            finally:
-                os.unlink(tmp.name)
+            r = evaluate_in_subprocess(label, path, idx, total, args)
             if is_base:
                 baseline_cache[key] = r
                 with open(args.baseline_cache, "w") as f:
                     json.dump(baseline_cache, f)
 
-        r["eval_config"] = key
-        r["is_baseline"] = is_base
+        r.update(label=label, eval_config=key, is_baseline=is_base)
         by_key[key] = r
         results.append(r)
-        # save incrementally
-        with open(args.out, "w") as f:
-            json.dump(legacy + list(by_key.values()), f, indent=2)
+        with open(args.out, "w") as f:  # save incrementally
+            json.dump(list(by_key.values()), f, indent=2)
 
-    base_results = {r["label"]: r for r in results if r["is_baseline"]}
-    run_results = [r for r in results if not r["is_baseline"]]
-
-    k_cols = resolve_pass_ks(args.n, args.pass_k)
-
-    width = 55 + 10 + 12 + 12 * len(k_cols) + 12 + 12
-    print("\n" + "=" * width)
-    print(
-        f"{args.dataset} results   (n={args.n}, T={args.temperature}, "
-        f"{results[0]['n_problems']} problems)"
-    )
-    print(
-        "p@k(unb) columns use the unbiased estimator (Chen et al. 2021); "
-        "at k=n it coincides exactly with the empirical pass@n."
-    )
-    print("=" * width)
-
-    header = f"{'model':<55}{'avg@n':>10}{f'pass@{args.n}':>12}"
-    for k in k_cols:
-        header += f"{f'p@{k}(unb)':>12}"
-    header += f"{'Δavg':>12}{'Δpass':>12}"
-    print(header)
-    print("-" * width)
-
-    def fmt_row(r, delta_avg_str, delta_pass_str):
-        label = r["label"]
-        if len(label) > 54:
-            label = label[:51] + "..."
-        row = (
-            f"{label:<55}" f"{r['accuracy']*100:>9.1f}%" f"{r['pass_at_n']*100:>11.1f}%"
-        )
-        for k in k_cols:
-            v = r.get("pass_at_k_unbiased", {}).get(str(k))
-            row += f"{v*100:>11.1f}%" if v is not None else f"{'--':>12}"
-        row += f"{delta_avg_str:>12}{delta_pass_str:>12}"
-        return row
-
-    # print base models
-    for b_lbl in BASE_MODELS:
-        if b_lbl in base_results:
-            print(fmt_row(base_results[b_lbl], "+0.0pp", "+0.0pp"))
-
-    if base_results and run_results:
-        print("-" * width)
-
-    # print individual runs mapped to their bases
-    for r in run_results:
-        b_key = get_baseline_key(r["label"])
-
-        delta_avg_str = "--"
-        delta_pass_str = "--"
-
-        if b_key and b_key in base_results:
-            base_r = base_results[b_key]
-            d_avg = (r["accuracy"] - base_r["accuracy"]) * 100
-            d_pass = (r["pass_at_n"] - base_r["pass_at_n"]) * 100
-            delta_avg_str = f"{d_avg:+.1f}pp"
-            delta_pass_str = f"{d_pass:+.1f}pp"
-        elif not r["is_baseline"] and base_results:
-            print(
-                f"NOTE: '{r['label']}' matched no baseline "
-                f"(label contains none of: {', '.join(BASE_MODELS)}) — "
-                f"deltas omitted."
-            )
-
-        print(fmt_row(r, delta_avg_str, delta_pass_str))
-
-    print("=" * width)
+    print_table(results, args)
     print(f"\nFull per-problem results written to {args.out}")
 
 
 if __name__ == "__main__":
     main()
-
-
-# =================================================================================================================
-# model                                                       avg@n     pass@32   p@32(unb)        Δavg       Δpass
-# -----------------------------------------------------------------------------------------------------------------
-# qwen                                                        25.0%       95.3%       95.3%      +0.0pp      +0.0pp
-# llama                                                       27.4%       85.0%       85.0%      +0.0pp      +0.0pp
-# olmo                                                         1.6%       33.6%       33.6%      +0.0pp      +0.0pp
-# -----------------------------------------------------------------------------------------------------------------
-# lr_run_llama_lr=1e-6_low=1.0_high=0.1_s0                    36.7%       84.2%       84.2%      +9.2pp      -0.8pp
-# lr_run_llama_lr=2e-6_low=1.0_high=0.1_s0                    35.4%       79.2%       79.2%      +7.9pp      -5.8pp
-# lr_run_llama_lr=5e-7_low=1.0_high=0.1_s0                    31.1%       86.3%       86.3%      +3.7pp      +1.3pp
-# lr_run_olmo_lr=1e-6_low=1.0_high=0.1_s0_steps=2400          66.2%       93.7%       93.7%     +64.6pp     +60.1pp
-# lr_run_olmo_lr=2e-6_low=1.0_high=0.1_s0_steps=2400          66.3%       93.9%       93.9%     +64.7pp     +60.3pp
-# lr_run_olmo_lr=5e-7_low=1.0_high=0.1_s0_steps=2400          66.0%       94.3%       94.3%     +64.4pp     +60.7pp
-# lr_run_qwen_lr=1e-6_low=1.0_high=0.1_s0_steps=2400          65.3%       96.9%       96.9%     +40.3pp      +1.6pp
-# lr_run_qwen_lr=2e-6_low=1.0_high=0.1_s0_steps=2400          67.8%       97.0%       97.0%     +42.9pp      +1.7pp
-# lr_run_qwen_lr=5e-7_low=1.0_high=0.1_s0_steps=2400          61.3%       97.7%       97.7%     +36.3pp      +2.4pp
-# r2_llama__low=0.1_high=inf_s0                                8.9%       64.0%       64.0%     -18.5pp     -21.0pp
-# r2_qwen__low=0.1_high=inf_s0                                40.8%       94.7%       94.7%     +15.8pp      -0.6pp
-# r2_qwen__low=0.2_high=inf_s0                                57.0%       97.3%       97.3%     +32.0pp      +2.0pp
-# run0_qwen_lr=5e-7_low=0.2_high=0.2_s0_steps=2400            59.5%       96.7%       96.7%     +34.5pp      +1.4pp
-# =================================================================================================================
