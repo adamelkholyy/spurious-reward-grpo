@@ -32,6 +32,24 @@ def resolve_output_dir(cli_args):
     os.makedirs(out, exist_ok=True)
     return out
 
+def resolve_run_name(cli_args):
+    model_lookup = {
+        "Qwen/Qwen2.5-1.5B-Instruct": "qwen",
+        "meta-llama/Llama-3.2-1B-Instruct": "llama",
+        "allenai/OLMo-2-0425-1B-Instruct": "olmo",
+        "Qwen/Qwen2.5-0.5B-Instruct": "qwen-small",
+        "Qwen/Qwen2.5-3B-Instruct": "qwen3b",
+    }
+    model_name = model_lookup[cli_args.model]
+
+    if cli_args.switch_step:
+        info = f"{cli_args.switch_step}-{cli_args.max_steps}"
+    else:
+        info = f"gt_{cli_args.max_steps}"
+
+    return f"{cli_args.dataset}_{model_name}_{info}_s{cli_args.seed}"
+
+
 
 def save_model(trainer, label):
     is_lora = hasattr(trainer.model, "save_pretrained") and hasattr(

@@ -6,7 +6,7 @@ import logging
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from settings import HPC
-from utils import resolve_output_dir
+from utils import resolve_output_dir, resolve_run_name
 from GRPORunner import GRPORunner
 from tasks import available_tasks
 from rewards import available_rewards
@@ -101,10 +101,9 @@ args = parser.parse_args()
 
 
 if __name__ == "__main__":
-    args.run_name = (
-        f"{args.run_name}_low={args.eps_low}_high={args.eps_high}_s{args.seed}"
-    )
-
+    if args.run_name is None:
+        args.run_name = resolve_run_name(args)
+        
     if int(os.environ.get("RANK", 0)) == 0:
         run = wandb.init(
             entity="adamelkholy25-university-of-cambridge",
