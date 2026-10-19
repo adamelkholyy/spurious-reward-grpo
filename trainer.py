@@ -59,7 +59,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--run_name",
-    default="run",
+    default=None,
     help="Run name used for wandb and output dir",
 )
 parser.add_argument(

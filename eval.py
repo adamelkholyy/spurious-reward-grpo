@@ -293,11 +293,11 @@ def collect_pairs(args):
                 new = f"{label}_run"
                 print(f"NOTE: discovered run '{label}' renamed to '{new}' (label reserved for baseline).")
                 pairs[i] = (new, path)
-        if not pairs and args.skip_baselines:
+        if not pairs and args.eval_baselines:
             sys.exit("No models found and baselines skipped.")
 
     baseline_labels = set()
-    if not args.skip_baselines:
+    if args.eval_baselines:
         if pairs:
             needed = {get_baseline_key(lbl) for lbl, _ in pairs} - {None}
         else:
@@ -389,8 +389,8 @@ def parse_args():
                     help="label=path pairs, e.g. run1=outputs/ckpt-300.")  
     ap.add_argument("--outputs-dir", dest="outputs_dir", default="outputs",
                     help="directory scanned when --models is omitted (default: outputs/)")  
-    ap.add_argument("--skip-baselines", action="store_true",
-                    help="do not automatically evaluate base models.")  
+    ap.add_argument("--eval-baselines", action="store_true",
+                    help="evaluate base models.")  
     ap.add_argument("--refresh-baselines", dest="refresh_baselines", action="store_true",
                     help="re-evaluate baselines even if cached results exist")  
     ap.add_argument("--n", type=int, default=32, help="samples per problem")
