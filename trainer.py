@@ -48,7 +48,7 @@ parser.add_argument(
 parser.add_argument(
     "--max_steps",
     type=int,
-    default=None,
+    default=2400,
     help="Total optimizer steps, defaults to 2400",
 )
 parser.add_argument(

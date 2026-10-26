@@ -40,7 +40,15 @@ def resolve_run_name(cli_args):
         "Qwen/Qwen2.5-0.5B-Instruct": "qwen-small",
         "Qwen/Qwen2.5-3B-Instruct": "qwen3b",
     }
-    model_name = model_lookup[cli_args.model]
+    if "llama" in cli_args.model:
+        model_name = "llama"
+    elif "qwen" in cli_args.model:
+        model_name = "qwen"
+    elif "olmo" in cli_args.model:
+        model_name = "olmo"        
+    else:
+        model_name = model_lookup.get(cli_args.model, "model")
+    # TODO getattribute 
 
     if cli_args.switch_step:
         info = f"{cli_args.switch_step}-{cli_args.max_steps}"

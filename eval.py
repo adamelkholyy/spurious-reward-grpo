@@ -237,8 +237,13 @@ def checkpoint_step(name: str):
     m = re.search(r"(\d+)$", name)
     return (int(m.group(1)) if m else -1, name)
 
+def check_for_alias(dir):
+    with open(os.path.join(dir, "README.md"), "r") as f:
+        metadata = f.read()
+    model_name = re.search(r"(?m)^model_name:\s*(.+)$", metadata).group(1)
+    return model_name
 
-def discover_models(outputs_dir: str, all_checkpoints=False, dataset_name="gsm8k"):
+def discover_models(outputs_dir: str, all_checkpoints=False, dataset_name="gsm8k", out="results/results_gsm8k.json"):
     """(label, path) for each run under outputs_dir: its latest checkpoint, or all of them."""
     if not os.path.isdir(outputs_dir):
         sys.exit(f"No such directory: {outputs_dir}")
@@ -267,13 +272,20 @@ def discover_models(outputs_dir: str, all_checkpoints=False, dataset_name="gsm8k
             base = f"{base}_{seen[base]}"
         else:
             seen[base] = 0
+
+        with open(out, "r") as f:   
+            results = json.load(f)
+        existing_results = []
+        for entry in results:
+            existing_results.append(entry["label"])
+
         for checkpoint in checkpoints:
             label = f"{base}-{checkpoint_step(checkpoint)[0]}" if all_checkpoints else base
+            potential_alias = check_for_alias(run_dir)
+            if label in existing_results or potential_alias in existing_results:
+                continue
             pairs.append((label, os.path.join(run_dir, checkpoint)))
-    for p in pairs:
-        print(p)
     return pairs
-
 
 def collect_pairs(args):
     """return (pairs, baseline_labels) of models to evaluate."""
@@ -287,7 +299,7 @@ def collect_pairs(args):
                 sys.exit(f"Label '{label}' is reserved for the base model")
             pairs.append((label, path))
     else:
-        pairs = discover_models(args.outputs_dir, args.all_checkpoints, args.dataset)
+        pairs = discover_models(args.outputs_dir, args.all_checkpoints, args.dataset, args.out)
         for i, (label, path) in enumerate(pairs):
             if label in BASE_MODELS:
                 new = f"{label}_run"
@@ -428,7 +440,9 @@ def main():
 
     baseline_cache = load_json(args.baseline_cache, {})
     by_key = {r["eval_config"]: r for r in load_json(args.out, [])}
-    print(baseline_cache)
+    # print(baseline_cache)
+    
+ 
 
     total = len(pairs)
     print(f"Evaluating {total} model(s)...")
@@ -438,6 +452,8 @@ def main():
         is_base = label in baseline_labels
         key = eval_config_key(path, args)
         header = f"\n=== [{idx}/{total}] '{label}' ({path}) — "
+
+
 
         if key in by_key:
             r = dict(by_key[key])
