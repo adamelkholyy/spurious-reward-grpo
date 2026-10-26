@@ -1,20 +1,13 @@
+import multiprocessing as mp
+import os
 import random
 import re
+from functools import lru_cache
 
-try:
-    import wandb
-except Exception:   
-    wandb = None
+import wandb
+from math_verify import parse, verify
 
 from utils import get_completion_text
-
-
-try:
-    from math_verify import parse, verify
-
-    _HAS_MATH_VERIFY = True
-except Exception:  # pragma: no cover
-    _HAS_MATH_VERIFY = False
 
 
 # answer extraction and grading
@@ -60,10 +53,6 @@ def _fast_equal(pred: str, gold: str) -> bool:
         return False
 
 
-
-from functools import lru_cache
-
-
 @lru_cache(maxsize=8192)
 def _parse_cached(expr: str):
     return parse(expr)
@@ -85,11 +74,7 @@ def _get_pool():
     """Lazy persistent pool created once, reused every reward call"""
     global _POOL
     if _POOL is None:
-        import multiprocessing as mp
-        import os
-
-        ctx = mp.get_context("fork")
-        _POOL = ctx.Pool(processes=min(16, os.cpu_count() or 8))
+        _POOL = mp.get_context("fork").Pool(processes=min(16, os.cpu_count() or 8))
     return _POOL
 
 
@@ -105,8 +90,6 @@ def batch_is_correct(responses: list[str], golds: list) -> list[bool]:
             results[i] = False
         elif _fast_equal(p, str(g)):
             results[i] = True
-        elif not _HAS_MATH_VERIFY:
-            results[i] = False  # fast path already covered the fallback logic
         else:
             hard.append(i)
 
@@ -122,8 +105,12 @@ def batch_is_correct(responses: list[str], golds: list) -> list[bool]:
 
 
 def is_correct(response: str, gold) -> bool:
-    """Single-sample grading (kept for external callers/tests)."""
-    return batch_is_correct([response], [gold])[0]
+    """Single-sample equivalent of batch_is_correct, without the worker pool so it
+    is safe inside the eval scripts' (daemonic) multiprocessing workers."""
+    pred = extract_boxed(response)
+    if pred is None or gold is None:
+        return False
+    return _fast_equal(pred, str(gold)) or _verify_pair((pred, str(gold)))
 
 
 
@@ -133,7 +120,6 @@ def is_correct(response: str, gold) -> bool:
 def ground_truth_reward(prompts, completions, answer, **kwargs):
     """1.0 if the boxed answer is mathematically correct, else 0.0."""
     responses = [get_completion_text(c) for c in completions]
-    # extracted = [extract_boxed(r) for r in responses]
     correct = batch_is_correct(responses, answer)
     scores = [1.0 if ok else 0.0 for ok in correct]
     return scores
@@ -142,11 +128,8 @@ def random_reward(completions, **kwargs):
     """Bernoulli(0.5) random reward"""
     responses = [get_completion_text(c) for c in completions]
     code_freq = sum("python" in r.lower() for r in responses) / len(responses)
-    try:
-        if wandb.run is not None:
-            wandb.log({"train/code_frequency": code_freq}, commit=False)
-    except Exception:
-        pass
+    if wandb.run is not None:
+        wandb.log({"train/code_frequency": code_freq}, commit=False)
     gamma = 0.5
     return [1.0 if random.random() < gamma else 0.0 for _ in completions]
 
@@ -207,8 +190,6 @@ def gsm8k_reward(prompts, completions, answer, **kwargs):
         1.0 if (e is not None and _num_equal(e, a)) else 0.0
         for e, a in zip(extracted, answer)
     ]
-    # _maybe_debug(kwargs, prompts, responses, answer, extracted, scores,
-    #              "GRPO gsm8k_strict")
     return scores
 
 
@@ -220,8 +201,6 @@ def gsm8k_flexible_reward(prompts, completions, answer, **kwargs):
         1.0 if (e is not None and _num_equal(e, a)) else 0.0
         for e, a in zip(extracted, answer)
     ]
-    # _maybe_debug(kwargs, prompts, responses, answer, extracted, scores,
-    #              "GRPO gsm8k_flexible")
     return scores
 
 
@@ -242,8 +221,6 @@ def incorrect_reward(prompts, completions, answer, **kwargs):
         0.0 if box is None else (0.0 if ok else 1.0)
         for box, ok in zip(extracted, correct)
     ]
-    # _maybe_debug(kwargs, prompts, responses, answer, extracted, scores,
-    #              "GRPO incorrect")
     return scores
 
 
@@ -258,7 +235,7 @@ def python_reward(completions, **kwargs):
 
 
 REWARD_REGISTRY = {
-    "ground_truth": [ground_truth_reward],  # gsm8k \boxed{}
+    "ground_truth": [ground_truth_reward],  # \boxed{} + math_verify
     "random": [random_reward],              # Bernoulli(0.5) 
     "random_p03": [random_reward_p03],      # Bernoulli(0.3)  
     "random_p07": [random_reward_p07],      # Bernoulli(0.7) 

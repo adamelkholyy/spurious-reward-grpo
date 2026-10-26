@@ -10,16 +10,7 @@ from collections.abc import Callable, Sequence
 import torch
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from trl import GRPOTrainer
-
-try:
-    from trl.trainer.utils import get_callable_name, get_config_model_id
-except Exception:
-
-    def get_callable_name(func: Callable) -> str:
-        return getattr(func, "__name__", func.__class__.__name__)
-
-    def get_config_model_id(config) -> str:
-        return getattr(config, "_name_or_path", "reward_model")
+from trl.trainer.utils import get_config_model_id
 
 
 RewardFunc = Union[Callable, torch.nn.Module, str]
@@ -150,12 +141,9 @@ class ScheduledGRPOTrainer(GRPOTrainer):
 
     # checkpointing at the switch.
     def _switch_checkpoint_dir(self) -> str:
-        try:
-            run_dir = self._get_output_dir(trial=None)
-        except Exception:
-            run_dir = self.args.output_dir
         return os.path.join(
-            run_dir, f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
+            self._get_output_dir(trial=None),
+            f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}",
         )
 
     def _save_switch_checkpoint(self, change: dict, applied: list[str]) -> None:
@@ -177,16 +165,7 @@ class ScheduledGRPOTrainer(GRPOTrainer):
             return
 
         self.accelerator.wait_for_everyone()
-
-        save_kwargs: dict[str, Any] = {}
-        try:
-            params = inspect.signature(self._save_checkpoint).parameters
-            if "metrics" in params:
-                save_kwargs["metrics"] = None
-        except (TypeError, ValueError):
-            pass
-
-        self._save_checkpoint(self.model, None, **save_kwargs)
+        self._save_checkpoint(self.model, None)
         self.accelerator.wait_for_everyone()
 
         self._protected_checkpoints.add(os.path.abspath(ckpt_dir))
@@ -209,12 +188,8 @@ class ScheduledGRPOTrainer(GRPOTrainer):
             "reward_func_names": list(self.reward_func_names),
             "reward_weights": [float(w) for w in self.reward_weights.tolist()],
         }
-        try:
-            os.makedirs(ckpt_dir, exist_ok=True)
-            with open(os.path.join(ckpt_dir, "switch_info.json"), "w") as f:
-                json.dump(info, f, indent=2)
-        except Exception as e:
-            print(f"[ScheduledGRPOTrainer] could not write switch_info.json: {e}")
+        with open(os.path.join(ckpt_dir, "switch_info.json"), "w") as f:
+            json.dump(info, f, indent=2)
 
     def _sorted_checkpoints(
         self,
@@ -228,12 +203,10 @@ class ScheduledGRPOTrainer(GRPOTrainer):
             checkpoint_prefix=checkpoint_prefix,
             use_mtime=use_mtime,
         )
-        protected = getattr(self, "_protected_checkpoints", None)
-        if not getattr(self, "_protect_switch_checkpoints", False) or not protected:
+        if not self._protect_switch_checkpoints:
             return checkpoints
-        return [c for c in checkpoints if os.path.abspath(c) not in protected]
+        return [c for c in checkpoints if os.path.abspath(c) not in self._protected_checkpoints]
 
-    # ------------------------------------------------------------------ #
     def _set_reward_funcs(
         self,
         reward_funcs: Union[RewardFunc, Sequence[RewardFunc]],
@@ -255,13 +228,9 @@ class ScheduledGRPOTrainer(GRPOTrainer):
         names: list[str] = []
         for func in reward_funcs:
             if isinstance(func, torch.nn.Module):
-                cfg = getattr(func, "config", None)
-                try:
-                    names.append(get_config_model_id(cfg).split("/")[-1])
-                except Exception:
-                    names.append(func.__class__.__name__)
+                names.append(get_config_model_id(func.config).split("/")[-1])
             else:
-                names.append(get_callable_name(func))
+                names.append(func.__name__)
 
         # handle reward weights
         if reward_weights is not None:
@@ -293,9 +262,6 @@ class ScheduledGRPOTrainer(GRPOTrainer):
         self.reward_weights = weights
         self.reward_processing_classes = proc
 
-        if hasattr(self, "_has_async_funcs"):
-            tools = getattr(self, "tools", []) or []
-            self._has_async_funcs = any(
-                inspect.iscoroutinefunction(f)
-                for f in (self.reward_funcs + list(tools))
-            )
+        self._has_async_funcs = any(
+            inspect.iscoroutinefunction(f) for f in self.reward_funcs + self.tools
+        )

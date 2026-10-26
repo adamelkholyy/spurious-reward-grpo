@@ -8,151 +8,114 @@ from tasks import get_task
 from ScheduledGRPOTrainer import ScheduledGRPOTrainer
 
 
+def run(model, tokenizer, args):
+    task = get_task(args.dataset)
+    ds = task.build_train(tokenizer)
 
-class GRPORunner():
+    # optionally train on a random subset of the data
+    if args.data_fraction < 1.0:
+        full_size = len(ds)
+        n = max(1, round(full_size * args.data_fraction))
+        ds = ds.shuffle(seed=args.seed).select(range(n))
+        print(f"Using {n}/{full_size} training examples (data_fraction={args.data_fraction})")
 
-    def run(self, model, tokenizer, args):
-        # resolve the dataset task 
-        task = get_task(getattr(args, "dataset", "gsm8k"))
-        ds = task.build_train(tokenizer)
+    reward_name = task.resolve_reward(args.reward)
+    task.validate_reward(reward_name)
+    reward_funcs = get_reward_funcs(reward_name)
 
-        # optionally train on a random subset of the data
-        data_fraction = float(getattr(args, "data_fraction", 1.0))
-        if data_fraction < 1.0:
-            full_size = len(ds)
-            n = max(1, round(full_size * data_fraction))
-            ds = ds.shuffle(seed=int(getattr(args, "seed", 0))).select(range(n))
-            print(f"Using {n}/{full_size} training examples (data_fraction={data_fraction})")
+    config = build_grpo_config(args)
+    grpo_args = GRPOConfig(**config)
+    set_num_generations(grpo_args.num_generations)  # for group-level rewards
 
-        reward_name = task.resolve_reward(getattr(args, "reward", None))
-        task.validate_reward(reward_name)
-        reward_funcs = get_reward_funcs(reward_name)
+    print("=" * 100)
+    for key, value in config.items():
+        print(f"{key}: {value}")
+    print("=" * 100)
+    print(f"Scheduling switches at step {args.switch_step}" if args.switch_step else "Scheduling OFF")
+    print(f"Running on {'HPC' if HPC else 'FLAMINGO'}")
+    print("=" * 100)
 
-        config = self.handle_grpo_config_args(args)
-        grpo_args = GRPOConfig(**config)
-        set_num_generations(grpo_args.num_generations)  # for group-level rewards
+    if args.switch_step:
+        trainer = ScheduledGRPOTrainer.with_switch(
+            model=model,
+            processing_class=tokenizer,
+            args=grpo_args,
+            reward_funcs=reward_funcs,  # used until the switch
+            train_dataset=ds,
+            switch_step=args.switch_step,
+            new_epsilon=args.new_eps_low,
+            new_epsilon_high=args.new_eps_high,
+            new_reward_funcs=get_reward_funcs(args.new_reward),
+        )
+    else:
+        trainer = GRPOTrainer(
+            model=model,
+            processing_class=tokenizer,
+            reward_funcs=reward_funcs,
+            args=grpo_args,
+            train_dataset=ds,
+        )
+    trainer.train()
 
-        self.print_config(config)
-        print(f"Scheduling switches at step {args.switch_step}" if args.switch_step else "Scheduling OFF")
-        print(f"Running on {'HPC' if HPC else 'FLAMINGO'}")
-        print("="*100)
 
-            
-        if args.switch_step: # TODO add multi-scheduling to args
-            trainer = ScheduledGRPOTrainer.with_switch(
-                model=model,
-                args=grpo_args,
-                reward_funcs=reward_funcs,      # used until the switch
-                train_dataset=ds,
-                switch_step=args.switch_step,
-                new_epsilon=getattr(args, "new_eps_low", 0.20),                
-                new_epsilon_high=getattr(args, "new_eps_high", 0.28),           
-                new_reward_funcs=get_reward_funcs(getattr(args, "new_reward", "ground_truth")),  # callable or list
-            )
+def parse_epsilon_high(value):
+    return INF_EPS_HIGH if str(value).lower() in ("inf", "infinity") else float(value)
+
+
+def build_grpo_config(args):
+    config = dict(GRPO_CONFIG)
+
+    # vLLM memory / batch overrides per machine, model and dataset; later overrides win
+    if HPC:  # CSD3
+        if "qwen" in args.model.lower():
+            config["vllm_gpu_memory_utilization"] = 0.22
+            print("Qwen, decreasing memory usage")
+    else:  # Flamingo
+        if "0.5B" in args.model:
+            config["vllm_gpu_memory_utilization"] = 0.5
+            print("Qwen-0.5B, increasing memory usage")
+
+    if "3b" in args.model.lower():
+        config["vllm_gpu_memory_utilization"] = 0.275
+        config["per_device_train_batch_size"] = 4
+        config["gradient_accumulation_steps"] = 16
+        print("Qwen-3B, decreasing memory usage")
+
+    if args.dataset == "wordle":
+        config["vllm_gpu_memory_utilization"] = 0.20 if HPC else 0.22
+
+    if args.dataset == "mbpp":
+        if "qwen" in args.model.lower():
+            config["vllm_gpu_memory_utilization"] = 0.25
+        elif HPC:
+            config["vllm_gpu_memory_utilization"] = 0.35
         else:
-            trainer = GRPOTrainer(
-                model=model,
-                processing_class=tokenizer,
-                reward_funcs=reward_funcs,
-                args=grpo_args,
-                train_dataset=ds,
-            )
-        trainer.train()
-
-    @staticmethod
-    def _parse_epsilon_high(value):
-        return INF_EPS_HIGH if str(value).lower() in ("inf", "infinity") else float(value)
-
-    @staticmethod
-    def handle_grpo_config_args(args):
-
-        config = dict(GRPO_CONFIG)
-
-        if HPC: # CSD3 specific settings
-            if "qwen" in  args.model.lower():
-                config["vllm_gpu_memory_utilization"] = 0.22
-                print("Qwen, decreasing memory usage")
-        else: # Flamingo specific settings 
-            if "0.5B" in args.model:
-                config["vllm_gpu_memory_utilization"] = 0.5
-                print("Qwen-0.5B, increasing memory usage")
-
-        if "3b" in args.model.lower():
-            config["vllm_gpu_memory_utilization"] = 0.275  # could be increased
-            config["per_device_train_batch_size"] = 4 
-            config["gradient_accumulation_steps"] = 16
-            print("Qwen-3B, decreasing memory usage")
-
-        if getattr(args, "dataset", "x") == "wordle":
-            config["vllm_gpu_memory_utilization"] = 0.20 if HPC else 0.22
-
-        if getattr(args, "dataset", "x") == "mbpp":
-            if "qwen" in args.model.lower():
-                config["vllm_gpu_memory_utilization"] = 0.25
-            elif HPC:
-                config["vllm_gpu_memory_utilization"] = 0.35
-            else:
-                config["vllm_gpu_memory_utilization"] = 0.40
-
-        if getattr(args, "dataset", "x") == "dapo":
-            config["vllm_gpu_memory_utilization"] = 0.35 if HPC else 0.4
-            config["per_device_train_batch_size"] = 4 
-            config["gradient_accumulation_steps"] = 16
-
-        if getattr(args, "eps_low", None) is not None:
-            config["epsilon"] = float(args.eps_low)
-        if getattr(args, "eps_high", None) is not None:
-            eh = args.eps_high
-            config["epsilon_high"] = GRPORunner._parse_epsilon_high(eh)
-        if getattr(args, "max_steps", None) is not None:
-            config["max_steps"] = int(args.max_steps)
-        if getattr(args, "seed", None) is not None:
-            config["seed"] = int(args.seed)
-        if getattr(args, "lr", None) is not None:
-            config["learning_rate"] = float(args.lr)
-        
-        if getattr(args, "save_steps", None) is not None:
-            config["save_steps"] = float(args.save_steps)
-
-        if args.model == "meta-llama/Llama-3.2-1B-Instruct":
             config["vllm_gpu_memory_utilization"] = 0.40
 
-        world_size = int(os.environ.get("WORLD_SIZE", 1))
-        if world_size > 1:
-            ga = config["gradient_accumulation_steps"]
-            assert ga % world_size == 0, f"grad accum {ga} not divisible by {world_size} GPUs"
-            config["gradient_accumulation_steps"] = ga // world_size
-            # if GRPO_CONFIG sets steps_per_generation / generation_batch_size explicitly, scale those too
+    if args.dataset == "dapo":
+        config["vllm_gpu_memory_utilization"] = 0.35 if HPC else 0.4
+        config["per_device_train_batch_size"] = 4
+        config["gradient_accumulation_steps"] = 16
 
-        config["output_dir"] = args.output_dir
-        return config
+    config["epsilon"] = args.eps_low
+    config["epsilon_high"] = parse_epsilon_high(args.eps_high)
+    config["max_steps"] = args.max_steps
+    config["seed"] = args.seed
+    if args.lr is not None:
+        config["learning_rate"] = args.lr
+    if args.save_step is not None:
+        config["save_steps"] = args.save_step
 
-    @staticmethod
-    def print_config(config: dict):
-        print("=" * 100)
-        for key, value in config.items():
-            print(f"{key}: {value}")
-        print("=" * 100)
+    if args.model == "meta-llama/Llama-3.2-1B-Instruct":
+        config["vllm_gpu_memory_utilization"] = 0.40
 
+    # keep the global batch fixed under multi-GPU; if GRPO_CONFIG sets
+    # steps_per_generation / generation_batch_size explicitly, scale those too
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    if world_size > 1:
+        ga = config["gradient_accumulation_steps"]
+        assert ga % world_size == 0, f"grad accum {ga} not divisible by {world_size} GPUs"
+        config["gradient_accumulation_steps"] = ga // world_size
 
-
-if __name__ == "__main__":
-    # GRPORunner smoke test
-    def reward_phase_a(completions, **kwargs):
-        return [float(len(c)) for c in completions]
-
-    def reward_phase_b(completions, **kwargs):
-        return [-abs(200 - len(c)) for c in completions]
-
-    print("Example schedule (pass to ScheduledGRPOTrainer(schedule=...)):")
-    example_schedule = [
-        {"step": 0, "epsilon": 0.2, "reward_funcs": reward_phase_a},
-        {
-            "step": 500,
-            "epsilon": 0.3,
-            "epsilon_high": 0.4,
-            "reward_funcs": reward_phase_b,
-        },
-    ]
-    for c in example_schedule:
-        print("  ", c)
+    config["output_dir"] = args.output_dir
+    return config

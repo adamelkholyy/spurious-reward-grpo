@@ -24,15 +24,8 @@ import tempfile
 import time
 
 from tasks import available_tasks, get_task
-from settings import HPC 
-
-BASE_MODELS = {
-    "qwen": "Qwen/Qwen2.5-1.5B-Instruct",
-    "llama": "meta-llama/Llama-3.2-1B-Instruct",
-    "olmo": "allenai/OLMo-2-0425-1B-Instruct",
-    "qwen-small": "Qwen/Qwen2.5-0.5B-Instruct",
-    "qwen3b": "Qwen/Qwen2.5-3B-Instruct",
-}
+from settings import HPC
+from utils import BASE_MODELS, get_baseline_key
 
 RESULTS_DIR = "results"
 MAX_MODEL_LEN = 4096
@@ -50,21 +43,6 @@ def effective_limit(task) -> int:
     return 500 if task.eval_split == task.train_split else 50000
 
 
-def get_baseline_key(label: str):
-    lbl = label.lower()
-    if "llama" in lbl:
-        return "llama"
-    if "olmo" in lbl:
-        return "olmo"
-    if "qwen" in lbl:
-        if "small" in lbl:
-            return "qwen-small"
-        if "3b" in lbl:
-            return "qwen3b"
-        return "qwen"
-    return None
-
-
 def eval_config_key(model_path: str, args) -> str:
     task = get_task(args.dataset)
     cfg = {
@@ -78,7 +56,6 @@ def eval_config_key(model_path: str, args) -> str:
         "pass_k": [],  # unused; kept so existing cache entries stay valid
     }
     return json.dumps(cfg, sort_keys=True)
-
 
 
 _POOL_GRADER = None
@@ -118,7 +95,6 @@ def grade_all(jobs, args, progress_prefix):
         [is_correct(t, gold) for t in texts]
         for texts, gold in tqdm(jobs, desc=desc, unit="prob", disable=args.n == 1)
     ]
-
 
 
 def run_one(args):
@@ -244,23 +220,29 @@ def checkpoint_step(name: str):
     m = re.search(r"(\d+)$", name)
     return (int(m.group(1)) if m else -1, name)
 
-def check_for_alias(dir):
-    with open(os.path.join(dir, "README.md"), "r") as f:
-        metadata = f.read()
-    model_name = re.search(r"(?m)^model_name:\s*(.+)$", metadata).group(1)
-    return model_name
 
-def discover_models(outputs_dir: str, all_checkpoints=False, dataset_name="gsm8k", out="results/results_gsm8k.json"):
-    """(label, path) for each run under outputs_dir: its latest checkpoint, or all of them."""
+def check_for_alias(run_dir):
+    """The run's original name from the TRL model card, which survives renaming the run dir."""
+    path = os.path.join(run_dir, "README.md")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        m = re.search(r"(?m)^model_name:\s*(.+)$", f.read())
+    return m.group(1) if m else None
+
+
+def discover_models(outputs_dir: str, all_checkpoints, dataset_name, out):
+    """(label, path) for each run under outputs_dir not already in `out`: its latest checkpoint, or all of them."""
     if not os.path.isdir(outputs_dir):
         sys.exit(f"No such directory: {outputs_dir}")
 
+    existing_labels = {r["label"] for r in load_json(out, [])}
     seen, pairs = {}, []
     for name in sorted(os.listdir(outputs_dir)):
         run_dir = os.path.join(outputs_dir, name)
         if not os.path.isdir(run_dir):
             continue
-        if dataset_name not in run_dir:
+        if dataset_name not in name:
             continue
         checkpoints = sorted(
             (c for c in os.listdir(run_dir) if is_model_dir(os.path.join(run_dir, c))),
@@ -280,19 +262,14 @@ def discover_models(outputs_dir: str, all_checkpoints=False, dataset_name="gsm8k
         else:
             seen[base] = 0
 
-        with open(out, "r") as f:   
-            results = json.load(f)
-        existing_results = []
-        for entry in results:
-            existing_results.append(entry["label"])
-
+        alias = check_for_alias(run_dir)
         for checkpoint in checkpoints:
             label = f"{base}-{checkpoint_step(checkpoint)[0]}" if all_checkpoints else base
-            potential_alias = check_for_alias(run_dir)
-            if label in existing_results or potential_alias in existing_results:
+            if label in existing_labels or alias in existing_labels:
                 continue
             pairs.append((label, os.path.join(run_dir, checkpoint)))
     return pairs
+
 
 def collect_pairs(args):
     """return (pairs, baseline_labels) of models to evaluate."""
@@ -312,8 +289,8 @@ def collect_pairs(args):
                 new = f"{label}_run"
                 print(f"NOTE: discovered run '{label}' renamed to '{new}' (label reserved for baseline).")
                 pairs[i] = (new, path)
-        if not pairs and args.eval_baselines:
-            sys.exit("No models found and baselines skipped.")
+        if not pairs and not args.eval_baselines:
+            sys.exit("No new models found and baselines not requested (--eval-baselines).")
 
     baseline_labels = set()
     if args.eval_baselines:
@@ -349,7 +326,7 @@ def evaluate_in_subprocess(label, path, idx, total, args) -> dict:
         "--n", str(args.n),
         "--temperature", str(args.temperature),
         "--max-tokens", str(args.max_tokens),
-    ]  
+    ]
 
     print(f"\n=== [{idx}/{total}] Evaluating '{label}'  ({path}) ===", flush=True)
     try:
@@ -411,21 +388,21 @@ def print_table(results, args):
 def parse_args():
     ap = argparse.ArgumentParser(description="Benchmark models on a dataset.")
     ap.add_argument("--dataset", choices=available_tasks(), default="gsm8k",
-                    help="dataset task to benchmark (tasks/<name>.py)")  
+                    help="dataset task to benchmark (tasks/<name>.py)")
     ap.add_argument("--models", nargs="+", default=None,
-                    help="label=path pairs, e.g. run1=outputs/ckpt-300.")  
+                    help="label=path pairs, e.g. run1=outputs/ckpt-300.")
     ap.add_argument("--outputs-dir", dest="outputs_dir", default="outputs",
-                    help="directory scanned when --models is omitted (default: outputs/)")  
+                    help="directory scanned when --models is omitted (default: outputs/)")
     ap.add_argument("--eval-baselines", action="store_true",
-                    help="evaluate base models.")  
+                    help="evaluate base models.")
     ap.add_argument("--refresh-baselines", dest="refresh_baselines", action="store_true",
-                    help="re-evaluate baselines even if cached results exist")  
+                    help="re-evaluate baselines even if cached results exist")
     ap.add_argument("--n", type=int, default=32, help="samples per problem")
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--max-tokens", dest="max_tokens", type=int, default=1024,
-                    help="generation cap per sample (default 1024)")  
+                    help="generation cap per sample (default 1024)")
     ap.add_argument("--all-checkpoints", "--all_checkpoints", dest="all_checkpoints", action="store_true",
-                    help="eval all checkpoints of each run, not just the latest")  
+                    help="eval all checkpoints of each run, not just the latest")
 
     # internal worker flags (set by the parent process; not for direct use).
     ap.add_argument("--worker-out", dest="worker_out", default=None, help=argparse.SUPPRESS)
@@ -439,7 +416,7 @@ def parse_args():
 def main():
     if not HPC:
         os.chdir("/local/scratch/ae581/zzsp")
-        
+
     args = parse_args()
 
     if args.worker_out:
@@ -455,9 +432,6 @@ def main():
 
     baseline_cache = load_json(args.baseline_cache, {})
     by_key = {r["eval_config"]: r for r in load_json(args.out, [])}
-    # print(baseline_cache)
-    
- 
 
     total = len(pairs)
     print(f"Evaluating {total} model(s)...")
@@ -467,8 +441,6 @@ def main():
         is_base = label in baseline_labels
         key = eval_config_key(path, args)
         header = f"\n=== [{idx}/{total}] '{label}' ({path}) — "
-
-
 
         if key in by_key:
             r = dict(by_key[key])

@@ -18,14 +18,7 @@ import time
 
 from settings import HPC
 from tasks import available_tasks, get_task
-
-BASE_MODELS = {
-    "qwen": "Qwen/Qwen2.5-1.5B-Instruct",
-    "llama": "meta-llama/Llama-3.2-1B-Instruct",
-    "olmo": "allenai/OLMo-2-0425-1B-Instruct",
-    "qwen-small": "Qwen/Qwen2.5-0.5B-Instruct",
-    "qwen3b": "Qwen/Qwen2.5-3B-Instruct",
-}
+from utils import BASE_MODELS, get_baseline_key
 
 RESULTS_DIR = "results"
 DISABLED_FILE = os.path.join(RESULTS_DIR, ".disabled_models.json")
@@ -214,7 +207,7 @@ def run_one(args):
     print(f"[{args.label}] avg lp {mu:.4f} +/- {sd:.4f} | entropy {h:.4f} nats | {elapsed:.0f}s")
 
 
-# ,odel discovery
+# model discovery
 def is_model_dir(d: str) -> bool:
     try:
         files = os.listdir(d)
@@ -282,22 +275,6 @@ def discover_models(outputs_dir, dataset, all_checkpoints=False, tag=None):
     return uniq
 
 
-def get_baseline_key(label):
-    """Map a run label to its base-model family (or None)."""
-    lbl = label.lower()
-    if "llama" in lbl:
-        return "llama"
-    if "olmo" in lbl:
-        return "olmo"
-    if "qwen" in lbl:
-        if "small" in lbl:
-            return "qwen-small"
-        if "3b" in lbl:
-            return "qwen3b"
-        return "qwen"
-    return None
-
-
 def collect_pairs(args):
     """Return (pairs, baseline_labels) of models to measure."""
     pairs = discover_models(args.outputs_dir, args.dataset, args.all_checkpoints, args.tag)
@@ -352,7 +329,7 @@ def measure_config_key(model_path: str, args) -> str:
         "temperature": args.temperature,
         "max_new_tokens": args.max_new_tokens,
         "seed": args.seed,
-        "num_beams": 1,    
+        "num_beams": 1,
         "beam_return": 0,
     }
     return json.dumps(cfg, sort_keys=True)
@@ -382,7 +359,7 @@ def measure_in_subprocess(label, path, idx, total, args) -> dict:
         "--temperature", str(args.temperature),
         "--max-new-tokens", str(args.max_new_tokens),
         "--seed", str(args.seed),
-    ]  
+    ]
 
     print(f"\n=== [{idx}/{total}] Measuring '{label}'  ({path}) ===", flush=True)
     try:
