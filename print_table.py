@@ -141,25 +141,32 @@ def print_results_table(
 ):
     """Reprint the eval script's results table from its output files."""
     rows = load_rows(results_path, baseline_cache_path, skip_substrings)
+    capitals = dataset_name(results_path) == "capitals"
+    if capitals:
+        from tasks.capitals import spread_metrics
 
     for (n, temp, n_prob, max_tok), base_results, sections in grouped_sections(rows, sort_by_model):
 
         def cells(r):
-            if is_baseline(r):
-                d_avg = d_pass = "+0.0pp"
+            if capitals:
+                # diversity columns replace the deltas (avg@n is the valid-answer rate here)
+                m = r["task_metrics"]
+                spread = spread_metrics(m["country_counts"])
+                extra = [m["distinct_countries"], f"{spread['effective_countries']:.2f}", f"{spread['evenness']:.3f}"]
+            elif is_baseline(r):
+                extra = ["+0.0pp", "+0.0pp"]
             elif b := base_results.get(get_baseline_key(r.get("label") or "")):
-                d_avg = f"{(r['accuracy'] - b['accuracy']) * 100:+.1f}pp"
-                d_pass = f"{(r['pass_at_n'] - b['pass_at_n']) * 100:+.1f}pp"
-            elif "capitals" in results_path:
-                d_avg, d_pass = r["task_metrics"]["distinct_countries"], "--"
+                extra = [
+                    f"{(r['accuracy'] - b['accuracy']) * 100:+.1f}pp",
+                    f"{(r['pass_at_n'] - b['pass_at_n']) * 100:+.1f}pp",
+                ]
             else:
-                d_avg = d_pass = "--"
+                extra = ["--", "--"]
             return [
                 r.get("label", "?"),
                 f"{r['accuracy'] * 100:.1f}%",
                 f"{r['pass_at_n'] * 100:.1f}%",
-                d_avg,
-                d_pass,
+                *extra,
             ]
 
         caption = (
@@ -167,11 +174,11 @@ def print_results_table(
             f"max_tokens={max_tok})"
         )
         if latex:
-            head = ["model", f"avg@{n}", f"pass@{n}", r"$\Delta$avg", r"$\Delta$pass"]
-            print_latex(sections, cells, head, caption)
+            extra = ["distinct", "$D_2$", "$E_2$"] if capitals else [r"$\Delta$avg", r"$\Delta$pass"]
+            print_latex(sections, cells, ["model", f"avg@{n}", f"pass@{n}", *extra], caption)
         else:
-            head = ["model", "avg@n", f"pass@{n}", "Δavg", "Δpass"]
-            print_ascii(sections, cells, head, caption)
+            extra = ["distinct", "D2", "E2"] if capitals else ["Δavg", "Δpass"]
+            print_ascii(sections, cells, ["model", "avg@n", f"pass@{n}", *extra], caption)
 
 
 def print_output_dist_table(results_path="results/results_output_dist.json"):
