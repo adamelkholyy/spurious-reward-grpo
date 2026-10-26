@@ -10,7 +10,6 @@ fresh subprocess; results are cached in a persistent JSON file.
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -18,7 +17,7 @@ import time
 
 from settings import HPC
 from tasks import available_tasks, get_task
-from utils import BASE_MODELS, get_baseline_key
+from utils import BASE_MODELS, discover_models, get_baseline_key, load_json
 
 RESULTS_DIR = "results"
 DISABLED_FILE = os.path.join(RESULTS_DIR, ".disabled_models.json")
@@ -26,8 +25,6 @@ DIST_METRICS = ["avg_logprob", "logprob_per_char", "mean_entropy"]
 SPLIT = "train"
 GEN_BATCH_SIZE = 16
 SCORE_BATCH_SIZE = 4
-OTHER_DATASET_TAGS = ("countdown", "dapo", "mbpp", "wordle")
-DATASET_ALIASES = {"countdown4": "countdown", "aime2024": "dapo"}
 
 
 # generation + scoring (worker side)
@@ -207,77 +204,18 @@ def run_one(args):
     print(f"[{args.label}] avg lp {mu:.4f} +/- {sd:.4f} | entropy {h:.4f} nats | {elapsed:.0f}s")
 
 
-# model discovery
-def is_model_dir(d: str) -> bool:
-    try:
-        files = os.listdir(d)
-    except OSError:
-        return False
-    return "config.json" in files and any(f.endswith((".safetensors", ".bin")) for f in files)
-
-
-def list_checkpoints(run_dir: str):
-    """[(step, path)] for checkpoint-<step> subdirs that are models, sorted by step."""
-    ckpts = []
-    for name in os.listdir(run_dir):
-        m = re.fullmatch(r"checkpoint-(\d+)", name)
-        path = os.path.join(run_dir, name)
-        if m and is_model_dir(path):
-            ckpts.append((int(m.group(1)), path))
-    return sorted(ckpts)
-
-
-def discover_models(outputs_dir, dataset, all_checkpoints=False, tag=None):
-    """(label, path) for each run under outputs_dir matching the dataset/tag."""
-    if not os.path.isdir(outputs_dir):
-        sys.exit(f"No such directory: {outputs_dir}")
-
-    disabled = set(load_json(DISABLED_FILE, []))
-    alias = DATASET_ALIASES.get(dataset, dataset)
-
-    pairs = []
-    for name in sorted(os.listdir(outputs_dir)):
-        run_dir = os.path.join(outputs_dir, name)
-        if not os.path.isdir(run_dir):
-            continue
-        label = re.sub(r"-\d{8,}$", "", name)  # strip trailing timestamp
-        if tag is not None and tag not in name:
-            continue
-        if dataset != "gsm8k":
-            if alias not in label and alias not in name:
-                print(f"{label} does not match dataset {alias}, skipping")
-                continue
-        elif any(t in label for t in OTHER_DATASET_TAGS):
-            print(f"{label} does not match gsm8k, skipping")
-            continue
-        if label in disabled or name in disabled:
-            print(f"{label} is disabled, skipping")
-            continue
-        if is_model_dir(run_dir):
-            pairs.append((label, run_dir))
-            continue
-        ckpts = list_checkpoints(run_dir)
-        if not ckpts:
-            continue
-        if all_checkpoints:
-            pairs.extend((f"{label}@{step}", path) for step, path in ckpts)
-        else:
-            pairs.append((label, ckpts[-1][1]))
-
-    seen, uniq = {}, []
-    for label, path in pairs:
-        if label in seen:
-            seen[label] += 1
-            label = f"{label}_{seen[label]}"
-        else:
-            seen[label] = 0
-        uniq.append((label, path))
-    return uniq
-
-
 def collect_pairs(args):
     """Return (pairs, baseline_labels) of models to measure."""
-    pairs = discover_models(args.outputs_dir, args.dataset, args.all_checkpoints, args.tag)
+    disabled = set(load_json(DISABLED_FILE, []))
+    pairs = []
+    for label, path in discover_models(args.outputs_dir, args.all_checkpoints, args.dataset, args.out):
+        run = os.path.basename(os.path.dirname(path))  # run folder name
+        if args.tag is not None and args.tag not in run:
+            continue
+        if run in disabled:
+            print(f"{run} is disabled, skipping")
+            continue
+        pairs.append((label, path))
     for i, (label, path) in enumerate(pairs):
         if label in BASE_MODELS:
             new = f"{label}_run"
@@ -305,18 +243,6 @@ def collect_pairs(args):
 
 
 # parent process
-def load_json(path: str, default):
-    if not os.path.exists(path):
-        return default
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        print(f"WARNING: {path} unreadable — ignoring it.", file=sys.stderr)
-        return default
-    return data if isinstance(data, type(default)) else default
-
-
 def measure_config_key(model_path: str, args) -> str:
     """Everything that affects the measured numbers (used for caching/reuse)."""
     cfg = {
@@ -447,8 +373,6 @@ def parse_args():
     ap.add_argument("--out", default=os.path.join(RESULTS_DIR, "results_output_dist.json"),
                     help="persistent results file; models already measured under the same "
                          "config are reused")
-    ap.add_argument("--force", action="store_true",
-                    help="re-measure even if the same config is already in the results file")
 
     # internal worker flags (set by the parent process; not for direct use).
     ap.add_argument("--worker-out", dest="worker_out", default=None, help=argparse.SUPPRESS)
@@ -483,9 +407,9 @@ def main():
         key = measure_config_key(path, args)
         header = f"\n=== [{idx}/{total}] '{label}' ({path}) — "
 
-        if not args.force and key in by_key:
+        if key in by_key:
             r = dict(by_key[key])
-            print(f"{header}already in {args.out}, reusing (--force to re-measure) ===")
+            print(f"{header}already in {args.out}, reusing ===")
             src = "from file"
         elif is_base and not args.refresh_baselines and key in baseline_cache:
             r = dict(baseline_cache[key])

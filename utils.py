@@ -1,4 +1,7 @@
+import json
 import os
+import re
+import sys
 from typing import Any
 
 # label -> HF id for the base models every run is compared against
@@ -9,6 +12,9 @@ BASE_MODELS = {
     "qwen-small": "Qwen/Qwen2.5-0.5B-Instruct",
     "qwen3b": "Qwen/Qwen2.5-3B-Instruct",
 }
+
+# eval dataset -> the training-run tag its runs are named with (DAPO runs are benchmarked on AIME 2024)
+DATASET_ALIASES = {"aime2024": "dapo"}
 
 
 def get_baseline_key(label: str):
@@ -70,3 +76,74 @@ def resolve_run_name(cli_args):
     if cli_args.data_fraction < 1.0:
         name += f"_frac{cli_args.data_fraction:g}"
     return name
+
+
+def load_json(path: str, default):
+    if not os.path.exists(path):
+        return default
+    with open(path) as f:
+        return json.load(f)
+
+
+def is_model_dir(d: str) -> bool:
+    try:
+        files = os.listdir(d)
+    except OSError:
+        return False
+    return "config.json" in files and any(f.endswith((".safetensors", ".bin")) for f in files)
+
+
+def checkpoint_step(name: str):
+    """sort key: numeric step from a trailing integer (checkpoint-300 -> 300)."""
+    m = re.search(r"(\d+)$", name)
+    return (int(m.group(1)) if m else -1, name)
+
+
+def check_for_alias(run_dir):
+    """The run's original name from the TRL model card, which survives renaming the run dir."""
+    path = os.path.join(run_dir, "README.md")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        m = re.search(r"(?m)^model_name:\s*(.+)$", f.read())
+    return m.group(1) if m else None
+
+
+def discover_models(outputs_dir: str, all_checkpoints, dataset_name, out):
+    """(label, path) for each run under outputs_dir not already in `out`: its latest checkpoint, or all of them."""
+    if not os.path.isdir(outputs_dir):
+        sys.exit(f"No such directory: {outputs_dir}")
+
+    existing_labels = {r["label"] for r in load_json(out, [])}
+    seen, pairs = {}, []
+    for name in sorted(os.listdir(outputs_dir)):
+        run_dir = os.path.join(outputs_dir, name)
+        if not os.path.isdir(run_dir):
+            continue
+        if DATASET_ALIASES.get(dataset_name, dataset_name) not in name:
+            continue
+        checkpoints = sorted(
+            (c for c in os.listdir(run_dir) if is_model_dir(os.path.join(run_dir, c))),
+            key=checkpoint_step,
+        )
+        if not checkpoints:
+            print(f"{run_dir}: no model checkpoints found, skipping")
+            continue
+        if not all_checkpoints:
+            checkpoints = checkpoints[-1:]
+
+        # one label per run (deduped across runs); checkpoints add a step suffix.
+        base = re.sub(r"-\d{8,}$", "", name)  # strip trailing timestamp
+        if base in seen:
+            seen[base] += 1
+            base = f"{base}_{seen[base]}"
+        else:
+            seen[base] = 0
+
+        alias = check_for_alias(run_dir)
+        for checkpoint in checkpoints:
+            label = f"{base}-{checkpoint_step(checkpoint)[0]}" if all_checkpoints else base
+            if label in existing_labels or alias in existing_labels:
+                continue
+            pairs.append((label, os.path.join(run_dir, checkpoint)))
+    return pairs

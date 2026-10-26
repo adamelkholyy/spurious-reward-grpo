@@ -14,9 +14,8 @@ so DAPO-trained checkpoints are benchmarked with byte-identical prompt format
 and grading. Held out: none of these problems are in (deduped) DAPO-Math-17k.
 
 This task is eval-only; ``build_train`` refuses so a 30-problem benchmark can
-never silently become training data. Note for eval.py: pass runs explicitly
-via ``--models label=path`` — auto-discovery filters run labels by dataset
-name and would skip runs labelled 'dapo'.
+never silently become training data. Run discovery in the eval scripts maps
+``--dataset aime2024`` to runs named with 'dapo' (``utils.DATASET_ALIASES``).
 """
 
 from __future__ import annotations
