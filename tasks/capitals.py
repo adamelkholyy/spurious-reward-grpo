@@ -11,7 +11,7 @@ Here the equivalence class is simply the *country* the completion names, so the
 metric is exact: ``distinct_countries`` = the number of different African
 countries named across the draws (use ``eval.py --n 100`` for 100 draws).
 How evenly the draws spread over those countries is reported alongside it as
-``effective_countries`` (inverse Simpson D2) and ``evenness`` (D2 / distinct);
+``effective_number`` (inverse Simpson D2) and ``evenness`` (D2 / distinct);
 see ``spread_metrics``.
 
 Training uses a single prompt, repeated ``n_train`` times to give the trainer
@@ -185,7 +185,7 @@ def distinct_countries(completions: Sequence[str]) -> int:
 def spread_metrics(counts: Dict[str, int]) -> dict:
     """How evenly the draws are spread over the countries named.
 
-    ``effective_countries`` is the inverse Simpson index D2 = 1 / sum(p_i^2): the
+    ``effective_number`` is the inverse Simpson index D2 = 1 / sum(p_i^2): the
     number of equally common countries with the same diversity (1/D2 is the
     probability two draws name the same country). ``evenness`` is D2 / K in
     (0, 1], 1 iff every named country is equally common. Both use plug-in
@@ -194,9 +194,9 @@ def spread_metrics(counts: Dict[str, int]) -> dict:
     """
     n = sum(counts.values())
     if n == 0:
-        return {"effective_countries": 0.0, "evenness": 0.0}
+        return {"effective_number": 0.0, "evenness": 0.0}
     d2 = 1.0 / sum((c / n) ** 2 for c in counts.values())
-    return {"effective_countries": d2, "evenness": d2 / len(counts)}
+    return {"effective_number": d2, "evenness": d2 / len(counts)}
 
 
 # ---------------------------------------------------------------------------
@@ -208,8 +208,8 @@ def group_rewards(countries: Sequence[Optional[str]]) -> List[float]:
     ``1/n`` for a completion whose country appears ``n`` times in the group,
     ``0.0`` for no recognised country. Sums to the group's distinct count.
     """
-    counts = Counter(c for c in countries if c)
-    return [1.0 / counts[c] if c else 0.0 for c in countries]
+    counts = Counter(c for c in countries if c is not None)
+    return [1.0 / counts[c] if c is not None else 0.0 for c in countries]
 
 
 def capitals_diversity_reward(prompts, completions, **kwargs):

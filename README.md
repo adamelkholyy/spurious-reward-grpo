@@ -22,12 +22,13 @@ python trainer.py --model Qwen/Qwen2.5-1.5B-Instruct --dataset gsm8k --reward ra
 
 Key flags:
 - `--model`: HF model id or local directory
-- `--dataset`: one of `gsm8k`, `deepscaler`, `wordle`, `countdown`, `dapo`, `aime2024`, `mbpp`
+- `--dataset`: one of `gsm8k`, `deepscaler`, `wordle`, `countdown`, `dapo`, `aime2024`, `mbpp`, `capitals`, `numbers`
 - `--reward`: choose  `random` for Spurious Rewards, else dataset name for the relevant ground-truth rewards (defaults to the dataset's `default_reward`)
 - `--eps_low` / `--eps_high`: GRPO clipping bounds (default `0.2` / `0.28`, DAPO-style), `inf` disables clip-high
 - `--run_name`: wandb run name and output dir (default `<dataset>_<model>_gt_<max_steps>_s<seed>`; note it does not encode the reward or clipping bounds)
 - `--max_steps`, `--lr`, `--seed`, `--save_step`, `--output_dir`
 - `--switch_step`: at this step switch to `--new_reward` / `--new_eps_low` / `--new_eps_high` (`ScheduledGRPOTrainer`); a checkpoint is saved at the switch
+- `--range LO-HI`: inclusive number range for `--dataset numbers` (default `1-100`); also accepted by both eval scripts, so e.g. train with `--range 1-100` and evaluate the held-out `--range 101-200`. eval.py writes non-default ranges to `results/results_numbers_LO-HI.json`
 
 Checkpoints/logs go to `outputs/<run_name>` and metrics log to Weights & Biases
 

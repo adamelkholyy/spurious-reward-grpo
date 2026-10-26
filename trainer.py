@@ -6,7 +6,7 @@ import logging
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from settings import HPC
-from utils import resolve_output_dir, resolve_run_name
+from utils import parse_range, resolve_output_dir, resolve_run_name
 import GRPORunner
 from tasks import available_tasks, get_task
 from rewards import available_rewards
@@ -105,11 +105,21 @@ parser.add_argument(
     help="Fraction of the training dataset to use, in (0, 1]. e.g. 0.5 = a random 50%% subset "
     "(seeded by --seed). Defaults to 1.0 (full dataset)",
 )
+parser.add_argument(
+    "--range",
+    type=parse_range,
+    default=None,
+    help="Inclusive LO-HI range for --dataset numbers, defaults to 1-100",
+)
 
 args = parser.parse_args()
 
 if not 0.0 < args.data_fraction <= 1.0:
     parser.error(f"--data_fraction must be in (0, 1], got {args.data_fraction}")
+if args.range:
+    if args.dataset != "numbers":
+        parser.error("--range only applies to --dataset numbers")
+    get_task("numbers").range = args.range
 
 
 if __name__ == "__main__":
@@ -131,6 +141,7 @@ if __name__ == "__main__":
                 "max_steps": args.max_steps,
                 "seed": args.seed,
                 "data_fraction": args.data_fraction,
+                "range": args.range,
                 "lr": args.lr,
                 "switch_step": args.switch_step,
             },
