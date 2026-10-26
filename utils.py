@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import re
@@ -75,7 +76,25 @@ def resolve_run_name(cli_args):
     name = f"{cli_args.dataset}_{model_name}_{info}_s{cli_args.seed}"
     if cli_args.data_fraction < 1.0:
         name += f"_frac{cli_args.data_fraction:g}"
+    if cli_args.range:
+        from tasks.numbers import DEFAULT_RANGE
+
+        if cli_args.range != DEFAULT_RANGE:
+            name += f"_range{cli_args.range[0]}-{cli_args.range[1]}"
     return name
+
+
+def answer_counts(task_metrics: dict):
+    """Per-answer counts stored by a diversity task (capitals or numbers), else None."""
+    return task_metrics.get("country_counts", task_metrics.get("number_counts"))
+
+
+def parse_range(value: str) -> tuple[int, int]:
+    """argparse type for --range: 'LO-HI' -> (LO, HI), inclusive."""
+    m = re.fullmatch(r"(\d+)-(\d+)", value.strip())
+    if not m or int(m[1]) > int(m[2]):
+        raise argparse.ArgumentTypeError(f"expected LO-HI with LO <= HI, got '{value}'")
+    return int(m[1]), int(m[2])
 
 
 def load_json(path: str, default):
@@ -109,12 +128,11 @@ def check_for_alias(run_dir):
     return m.group(1) if m else None
 
 
-def discover_models(outputs_dir: str, all_checkpoints, dataset_name, out):
-    """(label, path) for each run under outputs_dir not already in `out`: its latest checkpoint, or all of them."""
+def discover_models(outputs_dir: str, all_checkpoints, dataset_name, existing_labels):
+    """(label, path) for each run under outputs_dir not in `existing_labels`: its latest checkpoint, or all of them."""
     if not os.path.isdir(outputs_dir):
         sys.exit(f"No such directory: {outputs_dir}")
 
-    existing_labels = {r["label"] for r in load_json(out, [])}
     seen, pairs = {}, []
     for name in sorted(os.listdir(outputs_dir)):
         run_dir = os.path.join(outputs_dir, name)

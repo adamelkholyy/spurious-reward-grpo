@@ -17,7 +17,7 @@ import time
 
 from settings import HPC
 from tasks import available_tasks, get_task
-from utils import BASE_MODELS, discover_models, get_baseline_key, load_json
+from utils import BASE_MODELS, discover_models, get_baseline_key, load_json, parse_range
 
 RESULTS_DIR = "results"
 DISABLED_FILE = os.path.join(RESULTS_DIR, ".disabled_models.json")
@@ -208,7 +208,10 @@ def collect_pairs(args):
     """Return (pairs, baseline_labels) of models to measure."""
     disabled = set(load_json(DISABLED_FILE, []))
     pairs = []
-    for label, path in discover_models(args.outputs_dir, args.all_checkpoints, args.dataset, args.out):
+    # skip runs already measured on this dataset (and, for numbers, this range)
+    dataset_id = get_task(args.dataset).eval_dataset_id(SPLIT)
+    existing = {r["label"] for r in load_json(args.out, []) if r.get("dataset") == dataset_id}
+    for label, path in discover_models(args.outputs_dir, args.all_checkpoints, args.dataset, existing):
         run = os.path.basename(os.path.dirname(path))  # run folder name
         if args.tag is not None and args.tag not in run:
             continue
@@ -285,6 +288,7 @@ def measure_in_subprocess(label, path, idx, total, args) -> dict:
         "--temperature", str(args.temperature),
         "--max-new-tokens", str(args.max_new_tokens),
         "--seed", str(args.seed),
+        *(["--range", f"{args.range[0]}-{args.range[1]}"] if args.range else []),
     ]
 
     print(f"\n=== [{idx}/{total}] Measuring '{label}'  ({path}) ===", flush=True)
@@ -370,6 +374,8 @@ def parse_args():
     ap.add_argument("--temperature", type=float, default=1.0, help="sampling temperature")
     ap.add_argument("--max-new-tokens", dest="max_new_tokens", type=int, default=1024)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--range", type=parse_range, default=None,
+                    help="inclusive LO-HI range for --dataset numbers (default 1-100)")
     ap.add_argument("--out", default=os.path.join(RESULTS_DIR, "results_output_dist.json"),
                     help="persistent results file; models already measured under the same "
                          "config are reused")
@@ -380,11 +386,16 @@ def parse_args():
     ap.add_argument("--label", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--model-idx", dest="model_idx", default="?", help=argparse.SUPPRESS)
     ap.add_argument("--total-models", dest="total_models", default="?", help=argparse.SUPPRESS)
-    return ap.parse_args()
+    args = ap.parse_args()
+    if args.range and args.dataset != "numbers":
+        ap.error("--range only applies to --dataset numbers")
+    return args
 
 
 def main():
     args = parse_args()
+    if args.range:
+        get_task("numbers").range = args.range
 
     if args.worker_out:
         run_one(args)

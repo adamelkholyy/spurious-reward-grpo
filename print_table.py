@@ -3,7 +3,7 @@ import json
 import os
 import statistics
 
-from utils import BASE_MODELS, get_baseline_key
+from utils import BASE_MODELS, answer_counts, get_baseline_key
 
 # always shown when present; other baselines only when a displayed run maps to them
 DEFAULT_BASELINES = ("qwen", "llama", "olmo")
@@ -141,18 +141,18 @@ def print_results_table(
 ):
     """Reprint the eval script's results table from its output files."""
     rows = load_rows(results_path, baseline_cache_path, skip_substrings)
-    capitals = dataset_name(results_path) == "capitals"
-    if capitals:
+    diversity = any(answer_counts(r.get("task_metrics") or {}) is not None for r in rows)
+    if diversity:
         from tasks.capitals import spread_metrics
 
     for (n, temp, n_prob, max_tok), base_results, sections in grouped_sections(rows, sort_by_model):
 
         def cells(r):
-            if capitals:
+            if diversity:
                 # diversity columns replace the deltas (avg@n is the valid-answer rate here)
-                m = r["task_metrics"]
-                spread = spread_metrics(m["country_counts"])
-                extra = [m["distinct_countries"], f"{spread['effective_countries']:.2f}", f"{spread['evenness']:.3f}"]
+                counts = answer_counts(r["task_metrics"])
+                spread = spread_metrics(counts)
+                extra = [len(counts), f"{spread['effective_number']:.2f}", f"{spread['evenness']:.3f}"]
             elif is_baseline(r):
                 extra = ["+0.0pp", "+0.0pp"]
             elif b := base_results.get(get_baseline_key(r.get("label") or "")):
@@ -174,10 +174,10 @@ def print_results_table(
             f"max_tokens={max_tok})"
         )
         if latex:
-            extra = ["distinct", "$D_2$", "$E_2$"] if capitals else [r"$\Delta$avg", r"$\Delta$pass"]
+            extra = ["distinct", "$D_2$", "$E_2$"] if diversity else [r"$\Delta$avg", r"$\Delta$pass"]
             print_latex(sections, cells, ["model", f"avg@{n}", f"pass@{n}", *extra], caption)
         else:
-            extra = ["distinct", "D2", "E2"] if capitals else ["Δavg", "Δpass"]
+            extra = ["distinct", "D2", "E2"] if diversity else ["Δavg", "Δpass"]
             print_ascii(sections, cells, ["model", "avg@n", f"pass@{n}", *extra], caption)
 
 

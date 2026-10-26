@@ -24,7 +24,8 @@ import time
 
 from tasks import available_tasks, get_task
 from settings import HPC
-from utils import BASE_MODELS, discover_models, get_baseline_key, load_json
+from tasks.numbers import DEFAULT_RANGE
+from utils import BASE_MODELS, answer_counts, discover_models, get_baseline_key, load_json, parse_range
 
 RESULTS_DIR = "results"
 MAX_MODEL_LEN = 4096
@@ -189,7 +190,7 @@ def run_one(args):
     }
     if task_metrics:
         result["task_metrics"] = task_metrics
-        print(f"[{args.label}] task metrics: { {k: v for k, v in task_metrics.items() if k != 'country_counts'} }")
+        print(f"[{args.label}] task metrics: { {k: v for k, v in task_metrics.items() if not k.endswith('_counts')} }")
     with open(args.worker_out, "w") as f:
         json.dump(result, f)
     print(
@@ -211,7 +212,8 @@ def collect_pairs(args):
                 sys.exit(f"Label '{label}' is reserved for the base model")
             pairs.append((label, path))
     else:
-        pairs = discover_models(args.outputs_dir, args.all_checkpoints, args.dataset, args.out)
+        existing = {r["label"] for r in load_json(args.out, [])}
+        pairs = discover_models(args.outputs_dir, args.all_checkpoints, args.dataset, existing)
         for i, (label, path) in enumerate(pairs):
             if label in BASE_MODELS:
                 new = f"{label}_run"
@@ -254,6 +256,7 @@ def evaluate_in_subprocess(label, path, idx, total, args) -> dict:
         "--n", str(args.n),
         "--temperature", str(args.temperature),
         "--max-tokens", str(args.max_tokens),
+        *(["--range", f"{args.range[0]}-{args.range[1]}"] if args.range else []),
     ]
 
     print(f"\n=== [{idx}/{total}] Evaluating '{label}'  ({path}) ===", flush=True)
@@ -304,17 +307,18 @@ def print_table(results, args):
         print(fmt_row(r, d_avg, d_pass))
     print("=" * width)
 
-    with_metrics = [r for r in results if r.get("task_metrics")]
-    if with_metrics and "distinct_countries" in with_metrics[0]["task_metrics"]:
+    with_counts = [r for r in results if answer_counts(r.get("task_metrics") or {}) is not None]
+    if with_counts:
         from tasks.capitals import spread_metrics
 
         print(f"\n{'model':<55}{'distinct':>10}{'D2':>8}{'E2':>8}{'valid':>8}{'draws':>8}")
-        for r in with_metrics:
+        for r in with_counts:
             m = r["task_metrics"]
-            spread = spread_metrics(m["country_counts"])  # from counts, so older results get it too
+            counts = answer_counts(m)
+            spread = spread_metrics(counts)  # from counts, so older results get it too
             label = r["label"] if len(r["label"]) <= 54 else r["label"][:51] + "..."
             print(
-                f"{label:<55}{m['distinct_countries']:>10}{spread['effective_countries']:>8.2f}"
+                f"{label:<55}{len(counts):>10}{spread['effective_number']:>8.2f}"
                 f"{spread['evenness']:>8.3f}{m['n_valid']:>8}{m['n_samples']:>8}"
             )
 
@@ -337,6 +341,8 @@ def parse_args():
                     help="generation cap per sample (default 1024)")
     ap.add_argument("--all-checkpoints", "--all_checkpoints", dest="all_checkpoints", action="store_true",
                     help="eval all checkpoints of each run, not just the latest")
+    ap.add_argument("--range", type=parse_range, default=None,
+                    help="inclusive LO-HI range for --dataset numbers (default 1-100)")
 
     # internal worker flags (set by the parent process; not for direct use).
     ap.add_argument("--worker-out", dest="worker_out", default=None, help=argparse.SUPPRESS)
@@ -344,7 +350,10 @@ def parse_args():
     ap.add_argument("--label", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--model-idx", dest="model_idx", default="?", help=argparse.SUPPRESS)
     ap.add_argument("--total-models", dest="total_models", default="?", help=argparse.SUPPRESS)
-    return ap.parse_args()
+    args = ap.parse_args()
+    if args.range and args.dataset != "numbers":
+        ap.error("--range only applies to --dataset numbers")
+    return args
 
 
 def main():
@@ -352,12 +361,18 @@ def main():
         os.chdir("/local/scratch/ae581/zzsp")
 
     args = parse_args()
+    if args.range:
+        get_task("numbers").range = args.range
 
     if args.worker_out:
         run_one(args)
         return
 
-    args.out = os.path.join(RESULTS_DIR, f"results_{args.dataset}.json")
+    # one results file per non-default numbers range, so held-out evals don't overwrite each other
+    suffix = ""
+    if args.range and args.range != DEFAULT_RANGE:
+        suffix = f"_{args.range[0]}-{args.range[1]}"
+    args.out = os.path.join(RESULTS_DIR, f"results_{args.dataset}{suffix}.json")
     args.baseline_cache = os.path.join(RESULTS_DIR, f".{args.dataset}_baseline_cache.json")
     for p in (args.out, args.baseline_cache):
         os.makedirs(os.path.dirname(p), exist_ok=True)
