@@ -271,6 +271,20 @@ REWARD_REGISTRY = {
 }
 
 
+# Group size for rewards that are defined over the generations of one prompt
+# (e.g. capitals_diversity). GRPORunner sets it from GRPOConfig.num_generations.
+_NUM_GENERATIONS: int | None = None
+
+
+def set_num_generations(n: int | None) -> None:
+    global _NUM_GENERATIONS
+    _NUM_GENERATIONS = int(n) if n else None
+
+
+def get_num_generations() -> int | None:
+    return _NUM_GENERATIONS
+
+
 def get_reward_funcs(name: str):
     if name not in REWARD_REGISTRY:
         raise ValueError(

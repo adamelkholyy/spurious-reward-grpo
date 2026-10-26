@@ -131,6 +131,8 @@ def print_gsm8k_table(
                 return "+0.0pp", "+0.0pp"
             b = base_results.get(family(r.get("label")))
             if not b:
+                if "capitals" in results_path:
+                    return r.get("task_metrics")["distinct_countries"], "--"
                 return "--", "--"
             return (
                 f"{(r['accuracy'] - b['accuracy']) * 100:+.1f}pp",
@@ -167,7 +169,7 @@ def _print_ascii(sections, cells, k_cols, n, caption):
     print("=" * width)
     header = f"{'model':<55}{'avg@n':>10}{f'pass@{n}':>12}"
     # for k in k_cols:
-    #     header += f"{f'p@{k}(unb)':>12}"
+    #     header += f"{f'p@{k}(unb)':>12} 
     header += f"{'Δavg':>12}{'Δpass':>12}"
     print(header)
     print("-" * width)

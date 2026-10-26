@@ -2,7 +2,7 @@ import os
 
 from trl import GRPOConfig, GRPOTrainer
 
-from rewards import get_reward_funcs
+from rewards import get_reward_funcs, set_num_generations
 from settings import INF_EPS_HIGH, GRPO_CONFIG, HPC
 from tasks import get_task
 from ScheduledGRPOTrainer import ScheduledGRPOTrainer
@@ -16,6 +16,13 @@ class GRPORunner():
         task = get_task(getattr(args, "dataset", "gsm8k"))
         ds = task.build_train(tokenizer)
 
+        # optionally train on a random subset of the data
+        data_fraction = float(getattr(args, "data_fraction", 1.0))
+        if data_fraction < 1.0:
+            full_size = len(ds)
+            n = max(1, round(full_size * data_fraction))
+            ds = ds.shuffle(seed=int(getattr(args, "seed", 0))).select(range(n))
+            print(f"Using {n}/{full_size} training examples (data_fraction={data_fraction})")
 
         reward_name = task.resolve_reward(getattr(args, "reward", None))
         task.validate_reward(reward_name)
@@ -23,6 +30,7 @@ class GRPORunner():
 
         config = self.handle_grpo_config_args(args)
         grpo_args = GRPOConfig(**config)
+        set_num_generations(grpo_args.num_generations)  # for group-level rewards
 
         self.print_config(config)
         print(f"Scheduling switches at step {args.switch_step}" if args.switch_step else "Scheduling OFF")

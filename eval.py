@@ -196,6 +196,10 @@ def run_one(args):
         )
     grade_s = time.perf_counter() - t0
 
+    # optional task-specific summary over the raw samples (e.g. capitals diversity)
+    summarise = getattr(task, "summarise_samples", None)
+    task_metrics = summarise([texts for texts, _ in jobs]) if summarise else None
+
     n_prob = len(problems)
     accuracy = sum_avg / n_prob
     truncated_frac = n_truncated / (n_prob * args.n) if n_prob else 0.0
@@ -215,6 +219,9 @@ def run_one(args):
         "grade_seconds": round(grade_s, 1),
         "per_example": per_example,
     }
+    if task_metrics:
+        result["task_metrics"] = task_metrics
+        print(f"[{args.label}] task metrics: { {k: v for k, v in task_metrics.items() if k != 'country_counts'} }")
     with open(args.worker_out, "w") as f:
         json.dump(result, f)
     print(
@@ -391,6 +398,14 @@ def print_table(results, args):
                 )
         print(fmt_row(r, d_avg, d_pass))
     print("=" * width)
+
+    with_metrics = [r for r in results if r.get("task_metrics")]
+    if with_metrics and "distinct_countries" in with_metrics[0]["task_metrics"]:
+        print(f"\n{'model':<55}{'distinct':>10}{'valid':>8}{'draws':>8}")
+        for r in with_metrics:
+            m = r["task_metrics"]
+            label = r["label"] if len(r["label"]) <= 54 else r["label"][:51] + "..."
+            print(f"{label:<55}{m['distinct_countries']:>10}{m['n_valid']:>8}{m['n_samples']:>8}")
 
 
 def parse_args():

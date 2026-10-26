@@ -55,7 +55,11 @@ def resolve_run_name(cli_args):
     else:
         info = f"gt_{cli_args.max_steps}"
 
-    return f"{cli_args.dataset}_{model_name}_{info}_s{cli_args.seed}"
+    name = f"{cli_args.dataset}_{model_name}_{info}_s{cli_args.seed}"
+    data_fraction = getattr(cli_args, "data_fraction", 1.0)
+    if data_fraction < 1.0:
+        name += f"_frac{data_fraction:g}"
+    return name
 
 
 

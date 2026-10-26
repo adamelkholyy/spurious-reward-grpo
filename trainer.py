@@ -96,8 +96,18 @@ parser.add_argument(
     default=0.28,
     help="Epsilon high to switch to in the scheduling regime",
 )
+parser.add_argument(
+    "--data_fraction",
+    type=float,
+    default=1.0,
+    help="Fraction of the training dataset to use, in (0, 1]. e.g. 0.5 = a random 50%% subset "
+    "(seeded by --seed). Defaults to 1.0 (full dataset)",
+)
 
 args = parser.parse_args()
+
+if not 0.0 < args.data_fraction <= 1.0:
+    parser.error(f"--data_fraction must be in (0, 1], got {args.data_fraction}")
 
 
 if __name__ == "__main__":
@@ -117,6 +127,7 @@ if __name__ == "__main__":
                 "eps_high": args.eps_high,
                 "max_steps": args.max_steps,
                 "seed": args.seed,
+                "data_fraction": args.data_fraction,
             },
         )
 
