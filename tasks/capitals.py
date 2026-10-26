@@ -10,6 +10,9 @@ with a fine-tuned DeBERTa classifier.
 Here the equivalence class is simply the *country* the completion names, so the
 metric is exact: ``distinct_countries`` = the number of different African
 countries named across the draws (use ``eval.py --n 100`` for 100 draws).
+How evenly the draws spread over those countries is reported alongside it as
+``effective_countries`` (inverse Simpson D2) and ``evenness`` (D2 / distinct);
+see ``spread_metrics``.
 
 Training uses a single prompt, repeated ``n_train`` times to give the trainer
 something to iterate over (``n_train`` is a class attribute; with identical rows
@@ -179,6 +182,23 @@ def distinct_countries(completions: Sequence[str]) -> int:
     return len(country_histogram(completions))
 
 
+def spread_metrics(counts: Dict[str, int]) -> dict:
+    """How evenly the draws are spread over the countries named.
+
+    ``effective_countries`` is the inverse Simpson index D2 = 1 / sum(p_i^2): the
+    number of equally common countries with the same diversity (1/D2 is the
+    probability two draws name the same country). ``evenness`` is D2 / K in
+    (0, 1], 1 iff every named country is equally common. Both use plug-in
+    frequencies, so D2 <= K. Compare evenness at equal valid sample sizes: K
+    grows with N, D2 barely does.
+    """
+    n = sum(counts.values())
+    if n == 0:
+        return {"effective_countries": 0.0, "evenness": 0.0}
+    d2 = 1.0 / sum((c / n) ** 2 for c in counts.values())
+    return {"effective_countries": d2, "evenness": d2 / len(counts)}
+
+
 # ---------------------------------------------------------------------------
 # Reward — registered as 'capitals_diversity'
 # ---------------------------------------------------------------------------
@@ -311,5 +331,6 @@ class CapitalsTask(DatasetSpec):
             "distinct_countries": len(hist),
             "n_samples": len(texts),
             "n_valid": sum(hist.values()),
+            **spread_metrics(hist),
             "country_counts": dict(hist.most_common()),
         }
