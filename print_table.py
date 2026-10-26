@@ -1,10 +1,12 @@
 import argparse
 import json
 import os
-import numpy as np
+import statistics
 
-BASELINE_FAMILIES = ("qwen", "llama", "olmo")
+from utils import BASE_MODELS, get_baseline_key
 
+# always shown when present; other baselines only when a displayed run maps to them
+DEFAULT_BASELINES = ("qwen", "llama", "olmo")
 
 DEFAULT_SKIP_SUBSTRINGS = (
     "lr",
@@ -35,143 +37,70 @@ def _tex(s):
     return "".join(_LATEX_ESCAPES.get(c, c) for c in str(s))
 
 
-def print_gsm8k_table(
-    results_path="results/results_gsm8k.json",
-    baseline_cache_path=None,
-    latex=False,
-    sort_by_model=False,
-    skip_substrings=DEFAULT_SKIP_SUBSTRINGS,
-):
-    """Reprint the eval script's results table from its output files."""
+def dataset_name(results_path):
+    return os.path.basename(results_path).removeprefix("results_").removesuffix(".json")
+
+
+def is_baseline(r):
+    return r.get("is_baseline", r.get("label") in BASE_MODELS)
+
+
+def load_rows(results_path, baseline_cache_path, skip_substrings):
+    """Eval rows plus cache-only baselines, minus labels matching skip_substrings."""
     with open(results_path) as f:
         rows = [dict(r, _from_cache=False) for r in json.load(f)]
 
-    # Merge cache-only baselines (results file always takes precedence).
+    # results file always takes precedence over the baseline cache
     seen = {r.get("eval_config") for r in rows if r.get("eval_config")}
     if baseline_cache_path and os.path.exists(baseline_cache_path):
         with open(baseline_cache_path) as f:
             for key, r in json.load(f).items():
                 if key not in seen:
-                    rows.append(
-                        {
-                            **r,
-                            "eval_config": key,
-                            "is_baseline": True,
-                            "_from_cache": True,
-                        }
-                    )
+                    rows.append({**r, "eval_config": key, "is_baseline": True, "_from_cache": True})
 
-    if skip_substrings:
-        pats = tuple(s.lower() for s in skip_substrings)
-        rows = [
-            r
-            for r in rows
-            if not any(p in (r.get("label") or "").lower() for p in pats)
-        ]
+    pats = tuple(s.lower() for s in skip_substrings)
+    return [r for r in rows if not any(p in (r.get("label") or "").lower() for p in pats)]
 
-    def family(label):
-        lbl = (label or "").lower()
-        return next((f for f in BASELINE_FAMILIES if f in lbl), None)
 
-    def is_baseline(r):
-        # label is always exactly the family name.
-        return r.get("is_baseline", r.get("label") in BASELINE_FAMILIES)
-
+def grouped_sections(rows, sort_by_model):
+    """Yield ((n, temp, n_prob, max_tok), base_results, sections) for each n=256 eval config."""
     groups = {}
     for r in rows:
-        cfg = (
-            r.get("n_samples"),
-            r.get("temperature"),
-            r.get("n_problems"),
-            r.get("max_tokens"),
-        )
+        cfg = (r.get("n_samples"), r.get("temperature"), r.get("n_problems"), r.get("max_tokens"))
         by_label = groups.setdefault(cfg, {})
-
         if r["_from_cache"] and r.get("label") in by_label:
             continue
         by_label[r.get("label")] = r  # last write wins
 
-    for (n, temp, n_prob, max_tok), by_label in sorted(
-        groups.items(), key=lambda kv: str(kv[0])
-    ):
-        if n != 256:
+    for cfg, by_label in sorted(groups.items(), key=lambda kv: str(kv[0])):
+        if cfg[0] != 256:
             continue
         grp = list(by_label.values())
         base_results = {r["label"]: r for r in grp if is_baseline(r)}
-        run_results = [r for r in grp if not is_baseline(r)]
-        k_cols = sorted({int(k) for r in grp for k in r.get("pass_at_k_unbiased", {})})
-
-        by_label_sort = lambda r: (r.get("label") or "")
+        run_results = sorted((r for r in grp if not is_baseline(r)), key=lambda r: r.get("label") or "")
+        shown = set(DEFAULT_BASELINES) | {get_baseline_key(r.get("label") or "") for r in run_results}
+        baselines = [b for b in BASE_MODELS if b in shown and b in base_results]
 
         if sort_by_model:
             sections = []
-            for b in BASELINE_FAMILIES:
-                sec = [base_results[b]] if b in base_results else []
-                sec += sorted(
-                    (r for r in run_results if family(r.get("label")) == b),
-                    key=by_label_sort,
-                )
+            for b in [*BASE_MODELS, None]:  # None collects runs matching no base model
+                sec = [base_results[b]] if b in baselines else []
+                sec += [r for r in run_results if get_baseline_key(r.get("label") or "") == b]
                 if sec:
                     sections.append(sec)
-            orphans = sorted(
-                (r for r in run_results if family(r.get("label")) is None),
-                key=by_label_sort,
-            )
-            if orphans:
-                sections.append(orphans)
         else:
-            sections = [
-                [base_results[b] for b in BASELINE_FAMILIES if b in base_results],
-                sorted(run_results, key=by_label_sort),
-            ]
+            sections = [[base_results[b] for b in baselines], run_results]
             sections = [s for s in sections if s]
 
-        def deltas(r):
-            if is_baseline(r):
-                return "+0.0pp", "+0.0pp"
-            b = base_results.get(family(r.get("label")))
-            if not b:
-                if "capitals" in results_path:
-                    return r.get("task_metrics")["distinct_countries"], "--"
-                return "--", "--"
-            return (
-                f"{(r['accuracy'] - b['accuracy']) * 100:+.1f}pp",
-                f"{(r['pass_at_n'] - b['pass_at_n']) * 100:+.1f}pp",
-            )
-
-        def cells(r):
-            d_avg, d_pass = deltas(r)
-            out = [
-                r.get("label", "?"),
-                f"{r['accuracy'] * 100:.1f}%",
-                f"{r['pass_at_n'] * 100:.1f}%",
-            ]
-            # for k in k_cols:
-            #     v = r.get("pass_at_k_unbiased", {}).get(str(k))
-            #     out.append(f"{v * 100:.1f}%" if v is not None else "--")
-            return out + [d_avg, d_pass]
-
-        caption = (
-            f"GSM8K results   (n={n}, T={temp}, {n_prob} problems, "
-            f"max_tokens={max_tok})"
-        )
-
-        if latex:
-            _print_latex(sections, cells, k_cols, n, caption)
-        else:
-            _print_ascii(sections, cells, k_cols, n, caption)
+        yield cfg, base_results, sections
 
 
-def _print_ascii(sections, cells, k_cols, n, caption):
-    width = 55 + 10 + 12 + 12 * len(k_cols) + 12 + 12
+def print_ascii(sections, cells, head, caption):
+    width = 55 + 10 + 12 * (len(head) - 2)
     print("\n" + "=" * width)
     print(caption)
     print("=" * width)
-    header = f"{'model':<55}{'avg@n':>10}{f'pass@{n}':>12}"
-    # for k in k_cols:
-    #     header += f"{f'p@{k}(unb)':>12} 
-    header += f"{'Δavg':>12}{'Δpass':>12}"
-    print(header)
+    print(f"{head[0]:<55}{head[1]:>10}" + "".join(f"{h:>12}" for h in head[2:]))
     print("-" * width)
 
     for i, sec in enumerate(sections):
@@ -180,23 +109,15 @@ def _print_ascii(sections, cells, k_cols, n, caption):
         for r in sec:
             c = cells(r)
             label = c[0] if len(c[0]) <= 54 else c[0][:51] + "..."
-            row = f"{label:<55}{c[1]:>10}"
-            for v in c[2:]:
-                row += f"{v:>12}"
-            print(row)
+            print(f"{label:<55}{c[1]:>10}" + "".join(f"{v:>12}" for v in c[2:]))
     print("=" * width)
 
 
-def _print_latex(sections, cells, k_cols, n, caption):
-    ncols = 5 + len(k_cols)
-    head = ["model", f"avg@{n}", f"pass@{n}"]
-    head += [f"p@{k} (unb.)" for k in k_cols]
-    head += [r"$\Delta$avg", r"$\Delta$pass"]
-
+def print_latex(sections, cells, head, caption):
     print()
     print(r"\begin{table}[t]")
     print(r"\centering")
-    print(r"\begin{tabular}{l" + "r" * (ncols - 1) + "}")
+    print(r"\begin{tabular}{l" + "r" * (len(head) - 1) + "}")
     print(r"\toprule")
     print(" & ".join(_tex(h) if not h.startswith("$") else h for h in head) + r" \\")
     print(r"\midrule")
@@ -211,31 +132,57 @@ def _print_latex(sections, cells, k_cols, n, caption):
     print(r"\end{table}")
 
 
-def load_results(path="results_output_dist.json"):
-    """Load the results file and return a {label: entry} dict."""
-    with open(path) as f:
-        results = json.load(f)
-    return {e["label"]: e for e in results}
+def print_results_table(
+    results_path="results/results_gsm8k.json",
+    baseline_cache_path=None,
+    latex=False,
+    sort_by_model=False,
+    skip_substrings=DEFAULT_SKIP_SUBSTRINGS,
+):
+    """Reprint the eval script's results table from its output files."""
+    rows = load_rows(results_path, baseline_cache_path, skip_substrings)
+
+    for (n, temp, n_prob, max_tok), base_results, sections in grouped_sections(rows, sort_by_model):
+
+        def cells(r):
+            if is_baseline(r):
+                d_avg = d_pass = "+0.0pp"
+            elif b := base_results.get(get_baseline_key(r.get("label") or "")):
+                d_avg = f"{(r['accuracy'] - b['accuracy']) * 100:+.1f}pp"
+                d_pass = f"{(r['pass_at_n'] - b['pass_at_n']) * 100:+.1f}pp"
+            elif "capitals" in results_path:
+                d_avg, d_pass = r["task_metrics"]["distinct_countries"], "--"
+            else:
+                d_avg = d_pass = "--"
+            return [
+                r.get("label", "?"),
+                f"{r['accuracy'] * 100:.1f}%",
+                f"{r['pass_at_n'] * 100:.1f}%",
+                d_avg,
+                d_pass,
+            ]
+
+        caption = (
+            f"{dataset_name(results_path)} results   (n={n}, T={temp}, {n_prob} problems, "
+            f"max_tokens={max_tok})"
+        )
+        if latex:
+            head = ["model", f"avg@{n}", f"pass@{n}", r"$\Delta$avg", r"$\Delta$pass"]
+            print_latex(sections, cells, head, caption)
+        else:
+            head = ["model", "avg@n", f"pass@{n}", "Δavg", "Δpass"]
+            print_ascii(sections, cells, head, caption)
 
 
 def print_output_dist_table(results_path="results/results_output_dist.json"):
     with open(results_path) as f:
         results = json.load(f)
 
-    print(f"{'model':<65}{'mean entropy':>15}{'std':>15}")
-    print("-" * 80)
-
-    print(len(results))
-
+    print(f"{'model':<55}{'dataset':<50}{'mean entropy':>15}{'std':>15}")
+    print("-" * 135)
     for r in results:
-        e = r["label"]
-        try:
-            mean = r["stats"]["mean_entropy"]["mean"]
-            vari = r["stats"]["mean_entropy"]["std"]
-            print(f"{e:<65}{mean:>15.4f}{vari:>15.4f}")
-
-        except:
-            pass
+        h = r["distributions"]["mean_entropy"]
+        print(f"{r['label']:<55}{r['dataset']:<50}{statistics.mean(h):>15.4f}{statistics.stdev(h):>15.4f}")
 
 
 if __name__ == "__main__":
@@ -263,12 +210,10 @@ if __name__ == "__main__":
     if a.out_dist:
         print_output_dist_table()
     else:
-        print_gsm8k_table(
+        print_results_table(
             a.results_path,
             baseline_cache_path=a.baseline_cache,
             latex=a.latex,
             sort_by_model=a.sort_by_model,
             skip_substrings=() if a.no_skip else DEFAULT_SKIP_SUBSTRINGS,
         )
-
-    # print_output_dist_table()

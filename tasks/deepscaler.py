@@ -55,10 +55,7 @@ class DeepScaleRTask(DatasetSpec):
         return extract_boxed(completion)
 
     def make_grader(self):
-        # Reuse the reward module's boxed math-equivalence grader.
+        # Reuse the reward module's boxed math-equivalence grader (pool-free variant).
         from rewards import is_correct
 
-        def _is_correct(completion: str, gold) -> bool:
-            return is_correct(completion, gold)
-
-        return _is_correct
+        return is_correct

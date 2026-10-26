@@ -1,6 +1,30 @@
 import os
-import re
 from typing import Any
+
+# label -> HF id for the base models every run is compared against
+BASE_MODELS = {
+    "qwen": "Qwen/Qwen2.5-1.5B-Instruct",
+    "llama": "meta-llama/Llama-3.2-1B-Instruct",
+    "olmo": "allenai/OLMo-2-0425-1B-Instruct",
+    "qwen-small": "Qwen/Qwen2.5-0.5B-Instruct",
+    "qwen3b": "Qwen/Qwen2.5-3B-Instruct",
+}
+
+
+def get_baseline_key(label: str):
+    """Map a run label to its base-model label in BASE_MODELS (or None)."""
+    lbl = label.lower()
+    if "llama" in lbl:
+        return "llama"
+    if "olmo" in lbl:
+        return "olmo"
+    if "qwen" in lbl:
+        if "small" in lbl:
+            return "qwen-small"
+        if "3b" in lbl:
+            return "qwen3b"
+        return "qwen"
+    return None
 
 
 def get_completion_text(completion: Any) -> str:
@@ -20,35 +44,22 @@ def get_completion_text(completion: Any) -> str:
 
 
 def resolve_output_dir(cli_args):
-    if cli_args.output_dir:
-        out = cli_args.output_dir
-    else:
-        run_name = cli_args.run_name or f"{getattr(cli_args, 'method', 'grpo')}_gsm8k"
-        out = os.path.join("outputs", run_name)
-
-    # if os.path.exists(out):
-    #     out = f"{out}-{int(time.time())}"
-
+    out = cli_args.output_dir or os.path.join("outputs", cli_args.run_name)
     os.makedirs(out, exist_ok=True)
     return out
 
+
 def resolve_run_name(cli_args):
-    model_lookup = {
-        "Qwen/Qwen2.5-1.5B-Instruct": "qwen",
-        "meta-llama/Llama-3.2-1B-Instruct": "llama",
-        "allenai/OLMo-2-0425-1B-Instruct": "olmo",
-        "Qwen/Qwen2.5-0.5B-Instruct": "qwen-small",
-        "Qwen/Qwen2.5-3B-Instruct": "qwen3b",
-    }
+    # case-sensitive substring checks catch local checkpoint paths; HF ids fall through to the lookup
     if "llama" in cli_args.model:
         model_name = "llama"
     elif "qwen" in cli_args.model:
         model_name = "qwen"
     elif "olmo" in cli_args.model:
-        model_name = "olmo"        
+        model_name = "olmo"
     else:
+        model_lookup = {hf_id: label for label, hf_id in BASE_MODELS.items()}
         model_name = model_lookup.get(cli_args.model, "model")
-    # TODO getattribute 
 
     if cli_args.switch_step:
         info = f"{cli_args.switch_step}-{cli_args.max_steps}"
@@ -56,47 +67,6 @@ def resolve_run_name(cli_args):
         info = f"gt_{cli_args.max_steps}"
 
     name = f"{cli_args.dataset}_{model_name}_{info}_s{cli_args.seed}"
-    data_fraction = getattr(cli_args, "data_fraction", 1.0)
-    if data_fraction < 1.0:
-        name += f"_frac{data_fraction:g}"
+    if cli_args.data_fraction < 1.0:
+        name += f"_frac{cli_args.data_fraction:g}"
     return name
-
-
-
-def save_model(trainer, label):
-    is_lora = hasattr(trainer.model, "save_pretrained") and hasattr(
-        trainer.model, "peft_config"
-    )
-    out_dir = os.path.join(
-        trainer.args.output_dir, f"{'adapter' if is_lora else 'checkpoint'}-{label}"
-    )
-    trainer.model.save_pretrained(out_dir)
-    trainer.processing_class.save_pretrained(out_dir)
-    print(f"{'Adapter' if is_lora else 'Model'} saved to {out_dir}")
-
-
-def strip_calculator_annotations(text: str) -> str:
-    """Remove GSM8K-style calculator annotations (e.g. '<<48/2=24>>')."""
-    return re.sub(r"<<[^>]*>>", "", text)
-
-
-def split_prompt_answer(text: str) -> tuple[str, str]:
-
-    split_pattern = re.compile(r"(\nAnswer:|\nCorrect:|\nSolution\n|\nEndings:\n)")
-    matches = list(split_pattern.finditer(text))
-
-    if matches:
-        m = matches[-1]  # rightmost match
-        split_start = m.start()
-        split_end = m.end()
-
-        prompt = text[:split_start]
-        answer = text[split_end:]
-        return prompt, answer
-
-    # else default to last newline split
-    idx = text.rfind("\n")
-    if idx != -1:
-        return text[: idx + 1], text[idx + 1 :]
-
-    return text, ""

@@ -7,8 +7,8 @@ import logging
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from settings import HPC
 from utils import resolve_output_dir, resolve_run_name
-from GRPORunner import GRPORunner
-from tasks import available_tasks
+import GRPORunner
+from tasks import available_tasks, get_task
 from rewards import available_rewards
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -25,13 +25,13 @@ parser.add_argument(
     "--dataset",
     choices=available_tasks(),
     default="gsm8k",
-    help="Dataset to train on, options = ['gsm8k', 'countdown4', 'dapo', 'mbpp', 'aime2024'], defaults to gsm8k",
+    help="Dataset to train on, defaults to gsm8k",
 )
 parser.add_argument(
     "--reward",
     choices=available_rewards(),
     default=None,
-    help="Reward function, either 'random' for random binary rewards or the dataset name for ground truth rewards, defaults to gsm8k ground truth",
+    help="Reward function, e.g. 'random' for random binary rewards or the dataset name for ground truth rewards, defaults to the dataset's default_reward",
 )
 parser.add_argument(
     "--eps_low",
@@ -64,15 +64,15 @@ parser.add_argument(
 )
 parser.add_argument(
     "--lr",
+    type=float,
     default=None,
     help="AdamW optimiser learning rate",
 )
 parser.add_argument(
     "--output_dir",
     default=None,
-    help="Output directory, default: <run_name>_low=<eps_low>_high=<eps_high>_s<seed>).",
+    help="Output directory, default: outputs/<run_name>",
 )
-parser.add_argument("--lora", default=False, action="store_true", help="Enable LoRA")
 parser.add_argument(
     "--new_reward",
     default="ground_truth",
@@ -80,14 +80,16 @@ parser.add_argument(
 )
 parser.add_argument(
     "--switch_step",
+    type=int,
     default=None,
     help="Step at which to switch epsilon params and reward in the scheduling regime",
 )
 parser.add_argument(
-    "--save_step", default=None, help="Saves a checkpoint every <save_step> steps"
+    "--save_step", type=int, default=None, help="Saves a checkpoint every <save_step> steps"
 )
 parser.add_argument(
     "--new_eps_low",
+    type=float,
     default=0.20,
     help="Epsilon low to switch to in the scheduling regime",
 )
@@ -113,9 +115,10 @@ if not 0.0 < args.data_fraction <= 1.0:
 if __name__ == "__main__":
     if args.run_name is None:
         args.run_name = resolve_run_name(args)
-        
+    args.reward = get_task(args.dataset).resolve_reward(args.reward)
+
     if int(os.environ.get("RANK", 0)) == 0:
-        run = wandb.init(
+        wandb.init(
             entity="adamelkholy25-university-of-cambridge",
             project="dissertation",
             name=args.run_name,
@@ -128,11 +131,12 @@ if __name__ == "__main__":
                 "max_steps": args.max_steps,
                 "seed": args.seed,
                 "data_fraction": args.data_fraction,
+                "lr": args.lr,
+                "switch_step": args.switch_step,
             },
         )
 
     args.output_dir = resolve_output_dir(args)
-    post_trainer = GRPORunner()
 
     print(
         f"Benchmarking {args.model}, method=GRPO, "
@@ -151,4 +155,4 @@ if __name__ == "__main__":
         attn_implementation="sdpa" if HPC else "flash_attention_2",
     )
 
-    post_trainer.run(model, tokenizer, args)
+    GRPORunner.run(model, tokenizer, args)
