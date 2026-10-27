@@ -24,7 +24,7 @@ import time
 
 from tasks import available_tasks, get_task
 from settings import HPC
-from tasks.numbers import DEFAULT_RANGE
+from tasks.numbers import plot_distributions
 from utils import BASE_MODELS, answer_counts, discover_models, get_baseline_key, load_json, parse_range
 
 RESULTS_DIR = "results"
@@ -212,7 +212,12 @@ def collect_pairs(args):
                 sys.exit(f"Label '{label}' is reserved for the base model")
             pairs.append((label, path))
     else:
-        existing = {r["label"] for r in load_json(args.out, [])}
+        # skip runs already evaluated on this dataset id (for numbers: this range)
+        dataset_id = get_task(args.dataset).eval_dataset_id()
+        existing = {
+            r["label"] for r in load_json(args.out, [])
+            if json.loads(r["eval_config"])["dataset"] == dataset_id
+        }
         pairs = discover_models(args.outputs_dir, args.all_checkpoints, args.dataset, existing)
         for i, (label, path) in enumerate(pairs):
             if label in BASE_MODELS:
@@ -368,11 +373,8 @@ def main():
         run_one(args)
         return
 
-    # one results file per non-default numbers range, so held-out evals don't overwrite each other
-    suffix = ""
-    if args.range and args.range != DEFAULT_RANGE:
-        suffix = f"_{args.range[0]}-{args.range[1]}"
-    args.out = os.path.join(RESULTS_DIR, f"results_{args.dataset}{suffix}.json")
+    # one results file per dataset; numbers rows for different ranges differ by eval_config
+    args.out = os.path.join(RESULTS_DIR, f"results_{args.dataset}.json")
     args.baseline_cache = os.path.join(RESULTS_DIR, f".{args.dataset}_baseline_cache.json")
     for p in (args.out, args.baseline_cache):
         os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -407,6 +409,8 @@ def main():
                     json.dump(baseline_cache, f)
 
         r.update(label=label, eval_config=key, is_baseline=is_base)
+        if args.dataset == "numbers":
+            r["range"] = get_task("numbers")._gold()
         by_key[key] = r
         results.append(r)
         with open(args.out, "w") as f:  # save incrementally
@@ -414,6 +418,11 @@ def main():
 
     print_table(results, args)
     print(f"\nFull per-problem results written to {args.out}")
+
+    if args.dataset == "numbers":
+        plot_dir = os.path.join(RESULTS_DIR, "plots", "numbers")
+        paths = plot_distributions(list(by_key.values()), plot_dir)
+        print(f"{len(paths)} number distribution plot(s) written to {plot_dir}/<range>/")
 
 
 if __name__ == "__main__":
