@@ -7,6 +7,7 @@ from functools import lru_cache
 import wandb
 from math_verify import parse, verify
 
+from strategy_reward import strategy_rewards
 from utils import get_completion_text
 
 
@@ -204,6 +205,61 @@ def gsm8k_flexible_reward(prompts, completions, answer, **kwargs):
     return scores
 
 
+def _gsm8k_strategy_reward(prompts, completions, answer, question, alpha, **kwargs):
+    """Intermediate-value diversity reward (see strategy_reward.py).
+
+    Correctness is gsm8k_reward's strict '####' match, so the run differs from
+    GT-only training in the diversity term alone. Rewards are computed per group of
+    num_generations consecutive completions (one prompt each).
+    """
+    correct = [s == 1.0 for s in gsm8k_reward(prompts, completions, answer)]
+    responses = [get_completion_text(c) for c in completions]
+
+    g = get_num_generations() or len(responses)  # unset => one big group
+    rewards, sigs, distinct_per_group, all_correct = [], [], [], 0
+    for i in range(0, len(responses), g):
+        assert len(set(prompts[i : i + g])) == 1, "group split across workers: compute rewards after gathering"
+        rs, ss = strategy_rewards(
+            question[i], answer[i], responses[i : i + g], correct[i : i + g], alpha
+        )
+        rewards.extend(rs)
+        sigs.extend(ss)
+        distinct_per_group.append(len({s for s in ss if s is not None and s[0] == "chain"}))
+        all_correct += all(correct[i : i + g])
+
+    n_correct = sum(correct)
+    if wandb.run is not None and n_correct:
+        kinds = [s[0] for s in sigs if s is not None]
+        chains = [s for s in sigs if s is not None and s[0] == "chain"]
+        wandb.log(
+            {
+                "train/strategy_chain_frac": kinds.count("chain") / n_correct,
+                "train/strategy_invalid_frac": kinds.count("invalid") / n_correct,
+                "train/strategy_direct_frac": kinds.count("direct") / n_correct,
+                "train/strategy_distinct_per_group": sum(distinct_per_group) / len(distinct_per_group),
+                "train/strategy_values_per_chain": sum(len(s[1]) for s in chains) / max(1, len(chains)),
+                "train/strategy_all_correct_groups": all_correct / len(distinct_per_group),
+            },
+            commit=False,
+        )
+    return rewards
+
+
+def gsm8k_strategy_reward(prompts, completions, answer, question, **kwargs):
+    """Strategy-diversity reward, alpha = 0.5 (default)."""
+    return _gsm8k_strategy_reward(prompts, completions, answer, question, 0.5)
+
+
+def gsm8k_strategy_a025_reward(prompts, completions, answer, question, **kwargs):
+    """Strategy-diversity reward, alpha = 0.25 (strong diversity pressure)."""
+    return _gsm8k_strategy_reward(prompts, completions, answer, question, 0.25)
+
+
+def gsm8k_strategy_a075_reward(prompts, completions, answer, question, **kwargs):
+    """Strategy-diversity reward, alpha = 0.75 (weak diversity pressure)."""
+    return _gsm8k_strategy_reward(prompts, completions, answer, question, 0.75)
+
+
 def box_only_format_reward(completions, **kwargs):
     """1.0 if the response contains any \\boxed{...}, else 0.0."""
     responses = [get_completion_text(c) for c in completions]
@@ -242,6 +298,9 @@ REWARD_REGISTRY = {
     "gaussian": [gaussian_reward],          # N(0,1)        
     "gsm8k": [gsm8k_reward],                # true reward, verl strict '####'
     "gsm8k_flexible": [gsm8k_flexible_reward],  # true reward, last-number match
+    "gsm8k_strategy": [gsm8k_strategy_reward],  # true reward + strategy diversity, alpha=0.5
+    "gsm8k_strategy_a025": [gsm8k_strategy_a025_reward],  # alpha=0.25
+    "gsm8k_strategy_a075": [gsm8k_strategy_a075_reward],  # alpha=0.75
     "box_only": [box_only_format_reward],   # spurious: format only
     "incorrect": [incorrect_reward],        # spurious: negative correlation
     "python": [python_reward],              # spurious: code-reasoning nudge
