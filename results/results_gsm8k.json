@@ -369902,7 +369902,7 @@
     "is_baseline": false
   },
   {
-    "label": "gsm8k_llama_gt_4800_s0",
+    "label": "gsm8k_llama_gt_4800_s0-2400",
     "model": "outputs/gsm8k_llama_gt_4800_s0/checkpoint-2400",
     "prompt_template": "tokenizer_chat_template",
     "n_problems": 1319,

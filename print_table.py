@@ -9,6 +9,11 @@ from utils import BASE_MODELS, answer_counts, get_baseline_key
 # always shown when present; other baselines only when a displayed run maps to them
 DEFAULT_BASELINES = ("qwen", "llama", "olmo")
 
+# orders q for the Hill-number plots of diversity tasks
+HILL_QS = [i / 20 for i in range(0, 81)]  # 0 .. 4
+# categorical hues, assigned in table order; a plot with more models is split into panels
+SERIES_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948")
+
 DEFAULT_SKIP_SUBSTRINGS = (
     "lr",
     "SCHED",
@@ -99,6 +104,53 @@ def grouped_sections(rows, sort_by_model):
         yield cfg, base_results, sections
 
 
+def plot_hill_profiles(rows, title, path):
+    """Hill number D_q against order q, one line per row (baselines dashed).
+
+    Runs past the 8 colours spill into further panels with shared axes; every panel
+    repeats the baselines, in the same colours, as the reference.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import LogLocator, NullFormatter, ScalarFormatter
+
+    from tasks.capitals import hill_numbers
+
+    bases = [r for r in rows if is_baseline(r)]
+    runs = [r for r in rows if not is_baseline(r)]
+    k = max(len(SERIES_COLORS) - len(bases), 1)
+    base_colors = SERIES_COLORS[: len(bases)]
+    run_colors = SERIES_COLORS[len(bases) :] or SERIES_COLORS[-1:]
+    panels = [runs[i : i + k] for i in range(0, len(runs), k)] or [[]]
+    fig, axes = plt.subplots(
+        len(panels), 1, figsize=(10, 4 * len(panels)), sharex=True, sharey=True, squeeze=False
+    )
+    for ax, panel in zip(axes[:, 0], panels):
+        for r, color in [*zip(bases, base_colors), *zip(panel, run_colors)]:
+            ys = hill_numbers(answer_counts(r["task_metrics"]), HILL_QS)
+            ax.plot(HILL_QS, ys, color=color, linewidth=2, solid_capstyle="round",
+                    linestyle="--" if is_baseline(r) else "-", label=r.get("label", "?"))
+        ax.set_yscale("log")
+        ax.yaxis.set_major_locator(LogLocator(subs=(1, 2, 5)))
+        ax.yaxis.set_major_formatter(ScalarFormatter())
+        ax.yaxis.set_minor_formatter(NullFormatter())
+        ax.set_ylabel("Hill number $D_q$")
+        ax.grid(color="#e1e0d9", linewidth=0.5)
+        ax.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=8)
+    axes[-1, 0].set_xlabel("order q   (0: distinct, 1: exp Shannon, 2: inverse Simpson)")
+    axes[0, 0].set_title(title, fontsize=10, loc="left")
+    fig.tight_layout()
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
 def print_ascii(sections, cells, head, caption):
     width = 55 + 10 + 12 * (len(head) - 2)
     print("\n" + "=" * width)
@@ -142,8 +194,13 @@ def print_results_table(
     latex=False,
     sort_by_model=False,
     skip_substrings=DEFAULT_SKIP_SUBSTRINGS,
+    hill=True,
 ):
-    """Reprint the eval script's results table from its output files."""
+    """Reprint the eval script's results table from its output files.
+
+    For diversity tasks (capitals, numbers) each table also gets a Hill-number plot (D_q against
+    order q) at <results dir>/plots/<dataset>/hill_[<range>_]T<T>.png, unless hill=False.
+    """
     rows = load_rows(results_path, baseline_cache_path, skip_substrings)
     diversity = any(answer_counts(r.get("task_metrics") or {}) is not None for r in rows)
     if diversity:
@@ -184,6 +241,14 @@ def print_results_table(
             extra = ["distinct", "D2", "E2"] if diversity else ["Δavg", "Δpass"]
             print_ascii(sections, cells, ["model", "avg@n", f"pass@{n}", *extra], caption)
 
+        if diversity and hill:
+            name = dataset_name(results_path)
+            path = os.path.join(
+                os.path.dirname(results_path), "plots", name, f"hill_{rng + '_' if rng else ''}T{temp}.png"
+            )
+            plot_hill_profiles([r for sec in sections for r in sec], caption, path)
+            print(f"Hill-number plot written to {path}")
+
 
 def print_output_dist_table(results_path="results/results_output_dist.json"):
     with open(results_path) as f:
@@ -212,6 +277,11 @@ if __name__ == "__main__":
         help="keep labels containing " + "/".join(DEFAULT_SKIP_SUBSTRINGS),
     )
     p.add_argument(
+        "--no-hill",
+        action="store_true",
+        help="skip the Hill-number plots written for diversity tasks (capitals, numbers)",
+    )
+    p.add_argument(
         "--out_dist",
         action="store_true",
         help="print output distribution means and variances",
@@ -227,4 +297,5 @@ if __name__ == "__main__":
             latex=a.latex,
             sort_by_model=a.sort_by_model,
             skip_substrings=() if a.no_skip else DEFAULT_SKIP_SUBSTRINGS,
+            hill=not a.no_hill,
         )
