@@ -48,5 +48,5 @@ Constructs the entropy distributions of every model in the output dir matching t
 
 `eval_output_dist.py` takes `--tag <substring>` to only measure runs whose folder name contains the substring; runs listed in `results/.disabled_models.json` (toggled with `disable_models.py`) are skipped.
 
-`print_table.py` / `print_results_pct.py` reprint the results tables (absolute / relative deltas; the latter adds entropy deltas from `results_output_dist.json`).
+`print_table.py` / `print_results_pct.py` reprint the results tables (absolute / relative deltas; the latter adds entropy deltas from `results_output_dist.json`). For diversity tasks (`capitals`, `numbers`) `print_table.py` also writes a Hill-number plot ($D_q$ against order $q \in [0, 4]$, one line per model) for each table to `results/plots/<dataset>/hill_[<range>_]T<T>.png`; `--no-hill` skips it.
  

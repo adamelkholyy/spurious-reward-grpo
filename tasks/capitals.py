@@ -44,6 +44,7 @@ Caveats:
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from collections import Counter
@@ -197,6 +198,25 @@ def spread_metrics(counts: Dict[str, int]) -> dict:
         return {"effective_number": 0.0, "evenness": 0.0}
     d2 = 1.0 / sum((c / n) ** 2 for c in counts.values())
     return {"effective_number": d2, "evenness": d2 / len(counts)}
+
+
+def hill_numbers(counts: Dict[str, int], qs: Sequence[float]) -> List[float]:
+    """Hill numbers D_q = (sum p_i^q)^(1 / (1 - q)) of the draws, one per order q.
+
+    D_0 is the distinct count, D_1 = exp(Shannon entropy) (the q -> 1 limit), D_2 is
+    ``spread_metrics``' effective_number; larger q weights common answers more.
+    """
+    n = sum(counts.values())
+    if n == 0:
+        return [0.0 for _ in qs]
+    ps = [c / n for c in counts.values() if c > 0]
+    out = []
+    for q in qs:
+        if abs(q - 1.0) < 1e-9:
+            out.append(math.exp(-sum(p * math.log(p) for p in ps)))
+        else:
+            out.append(sum(p**q for p in ps) ** (1.0 / (1.0 - q)))
+    return out
 
 
 # ---------------------------------------------------------------------------
