@@ -95,7 +95,12 @@ class GSM8KTask(DatasetSpec):
             tokenize=False,
             add_generation_prompt=True,
         )
-        return {"prompt": prompt, "answer": self.extract_gold(x[self.answer_column])}
+        # raw question: gsm8k_strategy reads the problem's givens from it
+        return {
+            "prompt": prompt,
+            "answer": self.extract_gold(x[self.answer_column]),
+            "question": x[self.question_column],
+        }
 
     # --- gold / grading -----------------------------------------------------
     def extract_gold(self, answer_field) -> str:
