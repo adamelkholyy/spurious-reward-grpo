@@ -3,6 +3,7 @@ import json
 import os
 import statistics
 
+from tasks.numbers import row_range
 from utils import BASE_MODELS, answer_counts, get_baseline_key
 
 # always shown when present; other baselines only when a displayed run maps to them
@@ -63,10 +64,13 @@ def load_rows(results_path, baseline_cache_path, skip_substrings):
 
 
 def grouped_sections(rows, sort_by_model):
-    """Yield ((n, temp, n_prob, max_tok), base_results, sections) for each n=256 eval config."""
+    """Yield ((n, temp, n_prob, max_tok, range), base_results, sections) for each n=256 eval config.
+
+    ``range`` is the numbers task's ``"LO-HI"`` (None for other datasets), so each range gets its own table.
+    """
     groups = {}
     for r in rows:
-        cfg = (r.get("n_samples"), r.get("temperature"), r.get("n_problems"), r.get("max_tokens"))
+        cfg = (r.get("n_samples"), r.get("temperature"), r.get("n_problems"), r.get("max_tokens"), row_range(r))
         by_label = groups.setdefault(cfg, {})
         if r["_from_cache"] and r.get("label") in by_label:
             continue
@@ -145,7 +149,7 @@ def print_results_table(
     if diversity:
         from tasks.capitals import spread_metrics
 
-    for (n, temp, n_prob, max_tok), base_results, sections in grouped_sections(rows, sort_by_model):
+    for (n, temp, n_prob, max_tok, rng), base_results, sections in grouped_sections(rows, sort_by_model):
 
         def cells(r):
             if diversity:
@@ -170,8 +174,8 @@ def print_results_table(
             ]
 
         caption = (
-            f"{dataset_name(results_path)} results   (n={n}, T={temp}, {n_prob} problems, "
-            f"max_tokens={max_tok})"
+            f"{dataset_name(results_path)}{f' {rng}' if rng else ''} results   (n={n}, T={temp}, "
+            f"{n_prob} problems, max_tokens={max_tok})"
         )
         if latex:
             extra = ["distinct", "$D_2$", "$E_2$"] if diversity else [r"$\Delta$avg", r"$\Delta$pass"]

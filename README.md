@@ -28,7 +28,7 @@ Key flags:
 - `--run_name`: wandb run name and output dir (default `<dataset>_<model>_gt_<max_steps>_s<seed>`; note it does not encode the reward or clipping bounds)
 - `--max_steps`, `--lr`, `--seed`, `--save_step`, `--output_dir`
 - `--switch_step`: at this step switch to `--new_reward` / `--new_eps_low` / `--new_eps_high` (`ScheduledGRPOTrainer`); a checkpoint is saved at the switch
-- `--range LO-HI`: inclusive number range for `--dataset numbers` (default `1-100`); also accepted by both eval scripts, so e.g. train with `--range 1-100` and evaluate the held-out `--range 101-200`. eval.py writes non-default ranges to `results/results_numbers_LO-HI.json`
+- `--range LO-HI`: inclusive number range for `--dataset numbers` (default `1-100`); also accepted by both eval scripts, so e.g. train with `--range 1-100` and evaluate the held-out `--range 101-200`. eval.py writes every range to `results/results_numbers.json` (one row per model × range) and plots each row's number distribution to `results/plots/numbers/LO-HI/<label>.png`; `python merge_numbers_results.py` folds old per-range `results_numbers_LO-HI.json` files into it
 
 Checkpoints/logs go to `outputs/<run_name>` and metrics log to Weights & Biases
 

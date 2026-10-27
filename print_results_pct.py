@@ -62,7 +62,7 @@ def print_results_table(
     def entropy_of(r, label):
         return entropy.get((_hf_path(json.loads(r["eval_config"])["dataset"]), label))
 
-    for (n, temp, n_prob, max_tok), base_results, sections in grouped_sections(rows, sort_by_model):
+    for (n, temp, n_prob, max_tok, rng), base_results, sections in grouped_sections(rows, sort_by_model):
 
         def cells(r):
             mine = entropy_of(r, r.get("label"))
@@ -94,8 +94,8 @@ def print_results_table(
             ]
 
         caption = (
-            f"{dataset_name(results_path)} results   (n={n}, T={temp}, {n_prob} problems, "
-            f"max_tokens={max_tok}; accuracy deltas are relative % change, "
+            f"{dataset_name(results_path)}{f' {rng}' if rng else ''} results   (n={n}, T={temp}, "
+            f"{n_prob} problems, max_tokens={max_tok}; accuracy deltas are relative % change, "
             f"entropy deltas are raw differences vs. base)"
         )
         if latex:

@@ -169,3 +169,76 @@ class NumbersTask(DatasetSpec):
             **spread_metrics(hist),
             "number_counts": dict(hist.most_common()),
         }
+
+
+# ---- results rows & plots ----
+def row_range(row: dict) -> Optional[str]:
+    """``"LO-HI"`` of an eval.py numbers result row, else ``None``.
+
+    Read from the ``range`` field, falling back to the eval config's dataset id
+    (``"numbers:LO-HI"``) for rows written before that field existed.
+    """
+    if row.get("range"):
+        return row["range"]
+    import json
+
+    dataset = json.loads(row.get("eval_config") or "{}").get("dataset", "")
+    return dataset.removeprefix("numbers:") if dataset.startswith("numbers:") else None
+
+
+def plot_distributions(rows: Sequence[dict], out_dir: str) -> List[str]:
+    """One bar chart per result row: draws per integer over the row's full range.
+
+    Written to ``out_dir/<LO-HI>/<label>.png``; a label seen twice in one range
+    (e.g. different n / temperature) gets an ``_n<n>_T<T>`` suffix. Returns the paths.
+    """
+    import os
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from .capitals import spread_metrics
+
+    rows = [r for r in rows if row_range(r) and (r.get("task_metrics") or {}).get("number_counts") is not None]
+    seen = Counter((row_range(r), r["label"]) for r in rows)
+    paths = []
+    for r in rows:
+        rng = row_range(r)
+        lo, hi = _parse_gold(rng)
+        m = r["task_metrics"]
+        counts = {int(k): v for k, v in m["number_counts"].items()}  # JSON keys are strings
+        xs = list(range(lo, hi + 1))
+        spread = spread_metrics(Counter(counts))
+
+        fig, ax = plt.subplots(figsize=(10, 3.5))
+        ax.bar(xs, [counts.get(x, 0) for x in xs], width=0.8, color="#2a78d6", linewidth=0)
+        if m["n_valid"]:
+            ax.axhline(m["n_valid"] / len(xs), color="#52514e", linestyle="--", linewidth=1,
+                       label="uniform")
+            ax.legend(frameon=False, loc="upper right")
+        ax.set_xlim(lo - 1, hi + 1)
+        ax.set_xlabel("number")
+        ax.set_ylabel("draws")
+        ax.set_title(
+            f"{r['label']}   [{rng}, n={r.get('n_samples')}, T={r.get('temperature')}]\n"
+            f"distinct {len(counts)}/{len(xs)}   D2 {spread['effective_number']:.2f}   "
+            f"E2 {spread['evenness']:.3f}   valid {m['n_valid']}/{m['n_samples']}",
+            fontsize=10, loc="left",
+        )
+        ax.grid(axis="y", color="#e1e0d9", linewidth=0.5)
+        ax.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        fig.tight_layout()
+
+        name = r["label"]
+        if seen[(rng, r["label"])] > 1:
+            name += f"_n{r.get('n_samples')}_T{r.get('temperature')}"
+        path = os.path.join(out_dir, rng, f"{name}.png")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fig.savefig(path, dpi=120)
+        plt.close(fig)
+        paths.append(path)
+    return paths
