@@ -7,3 +7,5 @@ logs/
 *.sh
 settings.py
 tasks/__pycache__/
+results/plots/
+novelty-bench/
