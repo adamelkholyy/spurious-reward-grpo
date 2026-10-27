@@ -10,6 +10,7 @@ from utils import parse_range, resolve_output_dir, resolve_run_name
 import GRPORunner
 from tasks import available_tasks, get_task
 from rewards import available_rewards
+from embedding_reward import DEFAULT_EMBED_MODEL, set_embedding_config
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -111,6 +112,22 @@ parser.add_argument(
     default=None,
     help="Inclusive LO-HI range for --dataset numbers, defaults to 1-100",
 )
+parser.add_argument(
+    "--embed_tau",
+    type=float,
+    default=None,
+    help="Calibrated cosine threshold for the gsm8k_embedding rewards (required by them, see calibrate_embedding.py)",
+)
+parser.add_argument(
+    "--embed_model",
+    default=DEFAULT_EMBED_MODEL,
+    help=f"Frozen sentence embedder for the gsm8k_embedding rewards, defaults to {DEFAULT_EMBED_MODEL}",
+)
+parser.add_argument(
+    "--embed_keep_numbers",
+    action="store_true",
+    help="Don't mask numbers as 'N' before embedding (use if calibration gives a higher AUC unmasked)",
+)
 
 args = parser.parse_args()
 
@@ -120,6 +137,12 @@ if args.range:
     if args.dataset != "numbers":
         parser.error("--range only applies to --dataset numbers")
     get_task("numbers").range = args.range
+if any(r and r.startswith("gsm8k_embedding") for r in (args.reward, args.switch_step and args.new_reward)):
+    if args.embed_tau is None:
+        parser.error("the gsm8k_embedding rewards need --embed_tau (calibrate it with calibrate_embedding.py)")
+    if not 0.0 <= args.embed_tau < 1.0:
+        parser.error(f"--embed_tau must be in [0, 1), got {args.embed_tau}")
+set_embedding_config(args.embed_tau, args.embed_model, not args.embed_keep_numbers)
 
 
 if __name__ == "__main__":
@@ -144,6 +167,9 @@ if __name__ == "__main__":
                 "range": args.range,
                 "lr": args.lr,
                 "switch_step": args.switch_step,
+                "embed_tau": args.embed_tau,
+                "embed_model": args.embed_model,
+                "embed_mask_numbers": not args.embed_keep_numbers,
             },
         )
 

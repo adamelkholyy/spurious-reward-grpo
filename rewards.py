@@ -7,6 +7,9 @@ from functools import lru_cache
 import wandb
 from math_verify import parse, verify
 
+import numpy as np
+
+import embedding_reward as emb
 from strategy_reward import strategy_rewards
 from utils import get_completion_text
 
@@ -260,6 +263,68 @@ def gsm8k_strategy_a075_reward(prompts, completions, answer, question, **kwargs)
     return _gsm8k_strategy_reward(prompts, completions, answer, question, 0.75)
 
 
+def _gsm8k_embedding_reward(prompts, completions, answer, alpha, **kwargs):
+    """Embedding-similarity diversity reward (see embedding_reward.py).
+
+    Correctness is gsm8k_reward's strict '####' match, as for gsm8k_strategy. All
+    eligible samples in the batch are embedded in one call, then soft counts are
+    taken within each group of num_generations consecutive completions.
+    """
+    cfg = emb.get_embedding_config()
+    if cfg["tau"] is None:
+        raise ValueError("gsm8k_embedding needs a calibrated tau: pass --embed_tau (see calibrate_embedding.py)")
+    tau = cfg["tau"]
+
+    correct = np.array([s == 1.0 for s in gsm8k_reward(prompts, completions, answer)], bool)
+    texts = [emb.prepare(get_completion_text(c), cfg["mask_numbers"]) for c in completions]
+    eligible = emb.is_eligible(texts, correct)
+    E_all = np.zeros((len(texts), 0))
+    if eligible.any():
+        E_elig = emb.get_embedder()([t for t, e in zip(texts, eligible) if e])
+        E_all = np.zeros((len(texts), E_elig.shape[1]))
+        E_all[eligible] = E_elig
+
+    g = get_num_generations() or len(texts)  # unset => one big group
+    rewards, m_all, cos_all, all_correct, n_groups = [], [], [], 0, 0
+    for i in range(0, len(texts), g):
+        assert len(set(prompts[i : i + g])) == 1, "group split across workers: compute rewards after gathering"
+        sl = slice(i, i + g)
+        E = E_all[sl][eligible[sl]]
+        rs, _ = emb.group_rewards(texts[sl], correct[sl], E, tau, alpha)
+        rewards.extend(rs)
+        n_groups += 1
+        all_correct += bool(correct[sl].all())
+        if len(E):
+            m_all.extend(emb.soft_counts(E, tau).tolist())
+        if len(E) >= 2:
+            S = E @ E.T
+            cos_all.append(float(S[np.triu_indices(len(E), 1)].mean()))
+
+    n_correct = int(correct.sum())
+    if wandb.run is not None and n_correct:
+        stats = {
+            "train/embed_eligible_frac": float(eligible.sum()) / n_correct,
+            "train/embed_all_correct_groups": all_correct / n_groups,
+            "train/embed_truncated_frac": sum(len(t) >= 2000 for t in texts) / len(texts),
+        }
+        if m_all:
+            stats["train/embed_mean_soft_count"] = sum(m_all) / len(m_all)
+        if cos_all:
+            stats["train/embed_mean_pairwise_cos"] = sum(cos_all) / len(cos_all)
+        wandb.log(stats, commit=False)
+    return rewards
+
+
+def gsm8k_embedding_reward(prompts, completions, answer, **kwargs):
+    """Embedding-diversity reward, alpha = 0.5 (default)."""
+    return _gsm8k_embedding_reward(prompts, completions, answer, 0.5)
+
+
+def gsm8k_embedding_a025_reward(prompts, completions, answer, **kwargs):
+    """Embedding-diversity reward, alpha = 0.25 (strong diversity pressure)."""
+    return _gsm8k_embedding_reward(prompts, completions, answer, 0.25)
+
+
 def box_only_format_reward(completions, **kwargs):
     """1.0 if the response contains any \\boxed{...}, else 0.0."""
     responses = [get_completion_text(c) for c in completions]
@@ -301,6 +366,8 @@ REWARD_REGISTRY = {
     "gsm8k_strategy": [gsm8k_strategy_reward],  # true reward + strategy diversity, alpha=0.5
     "gsm8k_strategy_a025": [gsm8k_strategy_a025_reward],  # alpha=0.25
     "gsm8k_strategy_a075": [gsm8k_strategy_a075_reward],  # alpha=0.75
+    "gsm8k_embedding": [gsm8k_embedding_reward],  # true reward + embedding diversity, alpha=0.5
+    "gsm8k_embedding_a025": [gsm8k_embedding_a025_reward],  # alpha=0.25
     "box_only": [box_only_format_reward],   # spurious: format only
     "incorrect": [incorrect_reward],        # spurious: negative correlation
     "python": [python_reward],              # spurious: code-reasoning nudge
