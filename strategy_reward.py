@@ -30,7 +30,13 @@ from dataclasses import dataclass
 
 NUM = r"-?\d[\d,]*(?:\.\d+)?"
 ANNOT = re.compile(r"<<([^=<>]+)=([^<>]+)>>")
-EQN = re.compile(rf"((?:{NUM}|[()+\-*/×÷x^%$ ])+?)=\s*\$?\s*({NUM})")
+# Left-hand side of a free-text equation. Each number token is maximal (never followed
+# by a digit, a comma or a decimal part), so a run splits into tokens one way only, and a
+# match never starts inside a run: with NUM itself the regex backtracks exponentially on
+# long digit runs ("1000000000000000...") and hangs the reward.
+_TOK = r"\d[\d,]*(?:\.\d+)?(?![\d,]|\.\d)"
+_OP = r"[()+\-*/×÷x^%$ ]"
+EQN = re.compile(rf"(?<![\d()+\-*/×÷x^%$ ])((?:{_TOK}|{_OP})+?)=\s*\$?\s*({NUM})")
 
 _OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
         ast.Div: operator.truediv, ast.Pow: operator.pow, ast.USub: operator.neg}
@@ -73,7 +79,7 @@ def clean(lhs):
     lhs = re.sub(r"^[\sx]+", "", lhs)                          # 'x' of a preceding word ("six 6*5")
     lhs = lhs.replace("×", "*").replace("÷", "/").replace("^", "**")
     lhs = re.sub(r"(?<=\d)\s*x\s*(?=[\d(])", "*", lhs)        # 3 x 4
-    lhs = re.sub(r"(\d[\d,.]*)\s*%", r"(\1/100)", lhs)         # 25% -> (25/100)
+    lhs = re.sub(r"(?<![\d,.])(\d[\d,.]*)\s*%", r"(\1/100)", lhs)  # 25% -> (25/100)
     return lhs.replace("$", "").replace(",", "")
 
 
@@ -87,7 +93,7 @@ def extract_steps(text, rel_tol=1e-4):
         try:
             val, inputs = safe_eval(lhs)
             claimed = to_num(m.group(2))
-        except (ValueError, SyntaxError, ZeroDivisionError, OverflowError):
+        except (ValueError, SyntaxError, ZeroDivisionError, OverflowError, RecursionError, MemoryError):
             continue
         if abs(val - claimed) > rel_tol * max(1.0, abs(claimed)):
             continue                      # arithmetic does not check out
