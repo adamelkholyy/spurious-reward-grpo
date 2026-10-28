@@ -1,5 +1,6 @@
 import os
 
+from datasets import concatenate_datasets
 from trl import GRPOConfig, GRPOTrainer
 
 from rewards import get_reward_funcs, set_num_generations
@@ -26,6 +27,16 @@ def run(model, tokenizer, args):
     config = build_grpo_config(args)
     grpo_args = GRPOConfig(**config)
     set_num_generations(grpo_args.num_generations)  # for group-level rewards
+
+    # TRL's RepeatSampler drops any incomplete chunk of generation_batch_size // num_generations
+    # prompts, so a subset smaller than one chunk gives an empty epoch and training stops at step 0.
+    # Repeat it to fill a chunk: still only these n distinct problems, each seen more often.
+    prompts_per_gen = grpo_args.generation_batch_size // grpo_args.num_generations
+    if len(ds) < prompts_per_gen:
+        reps = -(-prompts_per_gen // len(ds))  # ceil
+        print(f"Only {len(ds)} examples but each generation batch takes {prompts_per_gen} prompts: "
+              f"repeating the dataset {reps}x")
+        ds = concatenate_datasets([ds] * reps)
 
     print("=" * 100)
     for key, value in config.items():
