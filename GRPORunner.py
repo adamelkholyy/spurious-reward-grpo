@@ -14,7 +14,13 @@ def run(model, tokenizer, args):
     ds = task.build_train(tokenizer)
 
     # optionally train on a random subset of the data
-    if args.data_fraction < 1.0:
+    if args.single_example:
+        ds = ds.shuffle(seed=args.seed).select([0])
+        print(f"Using a single training example (single_example, seed={args.seed})")
+    elif args.num_examples is not None:
+        ds = ds.shuffle(seed=args.seed).select(range(min(args.num_examples, len(ds))))
+        print(f"Using {len(ds)} training examples (num_examples, seed={args.seed})")
+    elif args.data_fraction < 1.0:
         full_size = len(ds)
         n = max(1, round(full_size * args.data_fraction))
         ds = ds.shuffle(seed=args.seed).select(range(n))

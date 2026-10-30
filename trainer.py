@@ -107,6 +107,18 @@ parser.add_argument(
     "(seeded by --seed). Defaults to 1.0 (full dataset)",
 )
 parser.add_argument(
+    "--single_example",
+    action="store_true",
+    help="Train on a single random example from the training dataset (seeded by --seed)",
+)
+parser.add_argument(
+    "--num_examples",
+    type=int,
+    default=None,
+    help="Train on N random examples from the training dataset (seeded by --seed). "
+    "The first example is the same one --single_example picks",
+)
+parser.add_argument(
     "--range",
     type=parse_range,
     default=None,
@@ -133,6 +145,13 @@ args = parser.parse_args()
 
 if not 0.0 < args.data_fraction <= 1.0:
     parser.error(f"--data_fraction must be in (0, 1], got {args.data_fraction}")
+if args.single_example and args.data_fraction < 1.0:
+    parser.error("--single_example and --data_fraction are mutually exclusive")
+if args.num_examples is not None:
+    if args.num_examples < 1:
+        parser.error(f"--num_examples must be >= 1, got {args.num_examples}")
+    if args.single_example or args.data_fraction < 1.0:
+        parser.error("--num_examples is mutually exclusive with --single_example and --data_fraction")
 if args.range:
     if args.dataset != "numbers":
         parser.error("--range only applies to --dataset numbers")
@@ -164,6 +183,8 @@ if __name__ == "__main__":
                 "max_steps": args.max_steps,
                 "seed": args.seed,
                 "data_fraction": args.data_fraction,
+                "single_example": args.single_example,
+                "num_examples": args.num_examples,
                 "range": args.range,
                 "lr": args.lr,
                 "switch_step": args.switch_step,

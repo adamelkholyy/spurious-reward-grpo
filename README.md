@@ -27,6 +27,7 @@ Key flags:
 - `--eps_low` / `--eps_high`: GRPO clipping bounds (default `0.2` / `0.28`, DAPO-style), `inf` disables clip-high
 - `--run_name`: wandb run name and output dir (default `<dataset>_<model>_gt_<max_steps>_s<seed>`; note it does not encode the reward or clipping bounds)
 - `--max_steps`, `--lr`, `--seed`, `--save_step`, `--output_dir`
+- `--data_fraction F` / `--single_example`: train on a random fraction `F` of the training set, or on one random example (both seeded by `--seed`, mutually exclusive). A subset smaller than one generation batch is repeated to fill it, so it is still only those distinct problems
 - `--switch_step`: at this step switch to `--new_reward` / `--new_eps_low` / `--new_eps_high` (`ScheduledGRPOTrainer`); a checkpoint is saved at the switch
 - `--range LO-HI`: inclusive number range for `--dataset numbers` (default `1-100`); also accepted by both eval scripts, so e.g. train with `--range 1-100` and evaluate the held-out `--range 101-200`. eval.py writes every range to `results/results_numbers.json` (one row per model × range) and plots each row's number distribution to `results/plots/numbers/LO-HI/<label>.png`; `python merge_numbers_results.py` folds old per-range `results_numbers_LO-HI.json` files into it
 

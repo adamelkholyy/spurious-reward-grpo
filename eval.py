@@ -14,6 +14,7 @@ in the results file.
 """
 
 import argparse
+import fcntl
 import json
 import multiprocessing as mp
 import os
@@ -246,6 +247,19 @@ def collect_pairs(args):
 
 
 # parent process: orchestration
+def save_result(out_path, r):
+    """merge one result into the results file. locks and re-reads it first so
+    concurrent eval.py runs don't overwrite each other's results."""
+    with open(out_path + ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        by_key = {x["eval_config"]: x for x in load_json(out_path, [])}
+        by_key[r["eval_config"]] = r
+        tmp = out_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(list(by_key.values()), f, indent=2)
+        os.replace(tmp, out_path)
+
+
 def evaluate_in_subprocess(label, path, idx, total, args) -> dict:
     """run the worker for one model and return its result dict."""
     tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
@@ -413,8 +427,7 @@ def main():
             r["range"] = get_task("numbers")._gold()
         by_key[key] = r
         results.append(r)
-        with open(args.out, "w") as f:  # save incrementally
-            json.dump(list(by_key.values()), f, indent=2)
+        save_result(args.out, r)  # save incrementally
 
     print_table(results, args)
     print(f"\nFull per-problem results written to {args.out}")

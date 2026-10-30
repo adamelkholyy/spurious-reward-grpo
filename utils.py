@@ -76,6 +76,10 @@ def resolve_run_name(cli_args):
     name = f"{cli_args.dataset}_{model_name}_{info}_s{cli_args.seed}"
     if cli_args.data_fraction < 1.0:
         name += f"_frac{cli_args.data_fraction:g}"
+    if cli_args.single_example:
+        name += "_single"
+    if cli_args.num_examples is not None:
+        name += f"_n{cli_args.num_examples}"
     if cli_args.range:
         from tasks.numbers import DEFAULT_RANGE
 
