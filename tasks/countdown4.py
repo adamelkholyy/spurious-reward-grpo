@@ -138,10 +138,20 @@ def countdown_reward(prompts, completions, answer, **kwargs):
     ]
 
 
+def countdown_format_reward(completions, **kwargs):
+    """Spurious/format-only baseline (cf. box_only): 1.0 iff the response has a
+    non-empty <answer>...</answer> block — ignores whether the equation is valid."""
+    from utils import get_completion_text
+
+    responses = [get_completion_text(c) for c in completions]
+    return [1.0 if extract_equation(r) is not None else 0.0 for r in responses]
+
+
 def _register_reward():
     from rewards import REWARD_REGISTRY
 
     REWARD_REGISTRY.setdefault("countdown", [countdown_reward])
+    REWARD_REGISTRY.setdefault("countdown_format", [countdown_format_reward])
 
 
 _register_reward()
@@ -160,7 +170,7 @@ class Countdown4Task(DatasetSpec):
     holdout_n = 500        # ...so hold out 500 rows: eval never trained on
 
     default_reward = "countdown"
-    allowed_rewards = ("countdown", "random")
+    allowed_rewards = ("countdown", "countdown_format", "random")
 
     system_prompt = None       # the user turn carries all instructions
     train_instruction = None   # (single prompt view; see module docstring)

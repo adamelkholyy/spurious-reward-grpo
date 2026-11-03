@@ -93,10 +93,20 @@ def dapo_reward(prompts, completions, answer, **kwargs):
     return [1.0 if grade(r, a) else 0.0 for r, a in zip(responses, answer)]
 
 
+def dapo_format_reward(completions, **kwargs):
+    """Spurious/format-only baseline (cf. box_only): 1.0 iff the response has
+    an extractable 'Answer: <x>' line — ignores correctness entirely."""
+    from utils import get_completion_text
+
+    responses = [get_completion_text(c) for c in completions]
+    return [1.0 if extract_dapo_answer(r) is not None else 0.0 for r in responses]
+
+
 def _register_reward():
     from rewards import REWARD_REGISTRY
 
     REWARD_REGISTRY.setdefault("dapo", [dapo_reward])
+    REWARD_REGISTRY.setdefault("dapo_format", [dapo_format_reward])
 
 
 _register_reward()

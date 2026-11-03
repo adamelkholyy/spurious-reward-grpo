@@ -331,6 +331,14 @@ def box_only_format_reward(completions, **kwargs):
     return [1.0 if extract_boxed(r) is not None else 0.0 for r in responses]
 
 
+def gsm8k_format_reward(completions, **kwargs):
+    """1.0 if the response has a '#### <number>' line (the GSM8K train-prompt format), else 0.0.
+    Same parse as gsm8k_reward but ignores correctness: the '####' analog of box_only.
+    """
+    responses = [get_completion_text(c) for c in completions]
+    return [1.0 if extract_gsm8k_strict(r) is not None else 0.0 for r in responses]
+
+
 
 def incorrect_reward(prompts, completions, answer, **kwargs):
     """1.0 iff the model produced a boxed answer that is WRONG.
@@ -369,6 +377,7 @@ REWARD_REGISTRY = {
     "gsm8k_embedding": [gsm8k_embedding_reward],  # true reward + embedding diversity, alpha=0.5
     "gsm8k_embedding_a025": [gsm8k_embedding_a025_reward],  # alpha=0.25
     "box_only": [box_only_format_reward],   # spurious: format only
+    "gsm8k_format": [gsm8k_format_reward],  # spurious: format only, '####' (gsm8k train prompt)
     "incorrect": [incorrect_reward],        # spurious: negative correlation
     "python": [python_reward],              # spurious: code-reasoning nudge
 }

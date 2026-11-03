@@ -199,7 +199,7 @@ def print_results_table(
     """Reprint the eval script's results table from its output files.
 
     For diversity tasks (capitals, numbers) each table also gets a Hill-number plot (D_q against
-    order q) at <results dir>/plots/<dataset>/hill_[<range>_]T<T>.png, unless hill=False.
+    order q) at <parent of results dir>/plots/<dataset>/hill_[<range>_]T<T>.png, unless hill=False.
     """
     rows = load_rows(results_path, baseline_cache_path, skip_substrings)
     diversity = any(answer_counts(r.get("task_metrics") or {}) is not None for r in rows)
@@ -244,7 +244,7 @@ def print_results_table(
         if diversity and hill:
             name = dataset_name(results_path)
             path = os.path.join(
-                os.path.dirname(results_path), "plots", name, f"hill_{rng + '_' if rng else ''}T{temp}.png"
+                os.path.dirname(os.path.dirname(os.path.abspath(results_path))), "plots", name, f"hill_{rng + '_' if rng else ''}T{temp}.png"
             )
             plot_hill_profiles([r for sec in sections for r in sec], caption, path)
             print(f"Hill-number plot written to {path}")

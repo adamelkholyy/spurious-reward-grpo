@@ -5,7 +5,8 @@ runners/__pycache__/
 logs/
 .gitconfig
 *.sh
+*.md
 settings.py
 tasks/__pycache__/
-results/plots/
+plots/
 archived_results/

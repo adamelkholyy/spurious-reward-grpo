@@ -385,7 +385,11 @@ def main():
 
     if args.worker_out:
         run_one(args)
-        return
+        # The result is already on disk; skip interpreter/vLLM teardown, which can
+        # hang indefinitely after generation (stalled the singlex sweep for ~26h).
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
 
     # one results file per dataset; numbers rows for different ranges differ by eval_config
     args.out = os.path.join(RESULTS_DIR, f"results_{args.dataset}.json")
@@ -433,7 +437,7 @@ def main():
     print(f"\nFull per-problem results written to {args.out}")
 
     if args.dataset == "numbers":
-        plot_dir = os.path.join(RESULTS_DIR, "plots", "numbers")
+        plot_dir = os.path.join("plots", "numbers")
         paths = plot_distributions(list(by_key.values()), plot_dir)
         print(f"{len(paths)} number distribution plot(s) written to {plot_dir}/<range>/")
 
