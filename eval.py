@@ -208,7 +208,10 @@ def collect_pairs(args):
         for m in args.models:
             if "=" not in m:
                 sys.exit(f"Bad --models entry '{m}', expected label=path")
-            label, path = m.split("=", 1)
+            # both can contain "=" (low=0.2_high=0.28), but labels have no "/": split at the last "=" before the path
+            head, slash, rest = m.partition("/")
+            label, path = head.rsplit("=", 1)
+            path += slash + rest
             if label in BASE_MODELS:
                 sys.exit(f"Label '{label}' is reserved for the base model")
             pairs.append((label, path))
