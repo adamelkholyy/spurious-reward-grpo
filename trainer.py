@@ -89,6 +89,18 @@ parser.add_argument(
     "--save_step", type=int, default=None, help="Saves a checkpoint every <save_step> steps"
 )
 parser.add_argument(
+    "--reset_optimizer_at_switch",
+    action="store_true",
+    help="Clear the optimizer state at --switch_step",
+)
+parser.add_argument(
+    "--save_at",
+    type=int,
+    nargs="+",
+    default=None,
+    help="Also save a checkpoint at exactly these steps",
+)
+parser.add_argument(
     "--new_eps_low",
     type=float,
     default=0.20,
@@ -109,7 +121,8 @@ parser.add_argument(
 parser.add_argument(
     "--single_example",
     action="store_true",
-    help="Train on a single random example from the training dataset (seeded by --seed)",
+    help="Train on a single random example from the training dataset (seeded by --seed). "
+    "With --switch_step, only until the switch, then on the full dataset",
 )
 parser.add_argument(
     "--num_examples",
@@ -143,6 +156,8 @@ parser.add_argument(
 
 args = parser.parse_args()
 
+if args.reset_optimizer_at_switch and not args.switch_step:
+    parser.error("--reset_optimizer_at_switch needs --switch_step")
 if not 0.0 < args.data_fraction <= 1.0:
     parser.error(f"--data_fraction must be in (0, 1], got {args.data_fraction}")
 if args.single_example and args.data_fraction < 1.0:
@@ -188,6 +203,7 @@ if __name__ == "__main__":
                 "range": args.range,
                 "lr": args.lr,
                 "switch_step": args.switch_step,
+                "reset_optimizer_at_switch": args.reset_optimizer_at_switch,
                 "embed_tau": args.embed_tau,
                 "embed_model": args.embed_model,
                 "embed_mask_numbers": not args.embed_keep_numbers,

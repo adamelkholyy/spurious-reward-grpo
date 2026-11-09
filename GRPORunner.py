@@ -1,6 +1,7 @@
 import os
 
 from datasets import concatenate_datasets
+from transformers import TrainerCallback
 from trl import GRPOConfig, GRPOTrainer
 
 from rewards import get_reward_funcs, set_num_generations
@@ -9,14 +10,31 @@ from tasks import get_task
 from ScheduledGRPOTrainer import ScheduledGRPOTrainer
 
 
+class SaveAtStepsCallback(TrainerCallback):
+    """Save a checkpoint at exactly the given steps."""
+
+    def __init__(self, steps):
+        self.steps = set(steps)
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step in self.steps:
+            control.should_save = True
+
+
 def run(model, tokenizer, args):
     task = get_task(args.dataset)
     ds = task.build_train(tokenizer)
 
     # optionally train on a random subset of the data
+    single_example = None
     if args.single_example:
-        ds = ds.shuffle(seed=args.seed).select([0])
-        print(f"Using a single training example (single_example, seed={args.seed})")
+        picked = ds.shuffle(seed=args.seed).select([0])
+        if args.switch_step:  # the scheduler trains on it until the switch, then on the full dataset
+            single_example = picked[0]
+            print(f"Using a single training example until step {args.switch_step} (seed={args.seed})")
+        else:
+            ds = picked
+            print(f"Using a single training example (single_example, seed={args.seed})")
     elif args.num_examples is not None:
         ds = ds.shuffle(seed=args.seed).select(range(min(args.num_examples, len(ds))))
         print(f"Using {len(ds)} training examples (num_examples, seed={args.seed})")
@@ -63,6 +81,8 @@ def run(model, tokenizer, args):
             new_epsilon=args.new_eps_low,
             new_epsilon_high=args.new_eps_high,
             new_reward_funcs=get_reward_funcs(args.new_reward),
+            single_example=single_example,
+            reset_optimizer=args.reset_optimizer_at_switch,
         )
     else:
         trainer = GRPOTrainer(
@@ -72,6 +92,8 @@ def run(model, tokenizer, args):
             args=grpo_args,
             train_dataset=ds,
         )
+    if args.save_at:
+        trainer.add_callback(SaveAtStepsCallback(args.save_at))
     trainer.train()
 
 

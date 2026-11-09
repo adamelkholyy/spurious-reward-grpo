@@ -19,6 +19,11 @@ RewardFunc = Union[Callable, torch.nn.Module, str]
 class ScheduledGRPOTrainer(GRPOTrainer):
     """
     GRPOTrainer that applies a schedule of parameter/reward changes during training.
+
+    `single_example`: a dataset row that replaces every prompt until the first scheduled change,
+    after which training uses `train_dataset`. Completions are also regenerated the moment that
+    change is due, so the step after it is already on the new data, reward and epsilon even when
+    it falls inside a generation cycle. Without it, new rewards wait for the next generation.
     """
 
     def __init__(
@@ -27,6 +32,7 @@ class ScheduledGRPOTrainer(GRPOTrainer):
         schedule: Optional[Sequence[dict]] = None,
         save_on_switch: bool = True,
         protect_switch_checkpoints: bool = True,
+        single_example: Optional[dict] = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -38,6 +44,9 @@ class ScheduledGRPOTrainer(GRPOTrainer):
         self._protect_switch_checkpoints = protect_switch_checkpoints
         self._protected_checkpoints: set[str] = set()
         self._in_training = False
+        self._single_example = single_example
+        if single_example is not None and not self._schedule:
+            raise ValueError("single_example needs a scheduled change to switch away from it.")
         # apply anything scheduled for step 0 / resumed-past steps right away.
         self._apply_schedule()
 
@@ -53,6 +62,7 @@ class ScheduledGRPOTrainer(GRPOTrainer):
         new_reward_weights: Optional[Sequence[float]] = None,
         new_reward_processing_classes: Optional[Sequence[Any]] = None,
         save_checkpoint: Optional[bool] = None,
+        reset_optimizer: bool = False,
         **kwargs,
     ) -> "ScheduledGRPOTrainer":
         """Build a trainer with a single change applied at `switch_step`."""
@@ -69,6 +79,8 @@ class ScheduledGRPOTrainer(GRPOTrainer):
             change["reward_processing_classes"] = new_reward_processing_classes
         if save_checkpoint is not None:
             change["save_checkpoint"] = save_checkpoint
+        if reset_optimizer:
+            change["reset_optimizer"] = True
         return cls(*args, schedule=[change], **kwargs)
 
     # check the schedule where epsilon and rewards are actually read.
@@ -91,12 +103,26 @@ class ScheduledGRPOTrainer(GRPOTrainer):
             num_items_in_batch=num_items_in_batch,
         )
 
+    def _prepare_inputs(self, generation_batch):
+        if self._single_example is not None and self.model.training and self._change_due():
+            self._buffered_inputs = None  # drop what's left of the old cycle and regenerate now
+        return super()._prepare_inputs(generation_batch)
+
     def _generate_and_score_completions(self, generation_batch):
         # reward_funcs are read here, at each generation cycle.
         self._apply_schedule()
+        if self._single_example is not None and self.state.global_step < int(self._schedule[0]["step"]):
+            generation_batch = [dict(self._single_example) for _ in generation_batch]
         return super()._generate_and_score_completions(generation_batch)
 
     # schedule application.
+    def _change_due(self) -> bool:
+        step = int(self.state.global_step)
+        return any(
+            i not in self._applied_schedule_idx and step >= int(change["step"])
+            for i, change in enumerate(self._schedule)
+        )
+
     def _apply_schedule(self) -> None:
         step = int(self.state.global_step)
         for i, change in enumerate(self._schedule):
@@ -138,6 +164,12 @@ class ScheduledGRPOTrainer(GRPOTrainer):
 
         if change.get("save_checkpoint", self._save_on_switch):
             self._save_switch_checkpoint(change, applied)
+
+        # after the save, so the switch checkpoint keeps the optimizer state it ended with.
+        if change.get("reset_optimizer"):
+            getattr(self.optimizer, "optimizer", self.optimizer).state.clear()
+            if self.accelerator.is_main_process:
+                print(f"[ScheduledGRPOTrainer] step {self.state.global_step}: reset optimizer state")
 
     # checkpointing at the switch.
     def _switch_checkpoint_dir(self) -> str:
