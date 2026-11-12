@@ -341,15 +341,24 @@ def gsm8k_format_reward(completions, **kwargs):
 
 
 def incorrect_reward(prompts, completions, answer, **kwargs):
-    """1.0 iff the model produced a boxed answer that is WRONG.
+    """1.0 iff the model gave a final answer that is WRONG, else 0.0 (no answer -> 0.0).
+
+    The answer is the last '#### <number>' (the GSM8K train-prompt format, same parse as
+    gsm8k_reward), falling back to the last \\boxed{} for tasks whose prompt asks for a box.
     """
     responses = [get_completion_text(c) for c in completions]
-    extracted = [extract_boxed(r) for r in responses]
-    correct = batch_is_correct(responses, answer)
-    scores = [
-        0.0 if box is None else (0.0 if ok else 1.0)
-        for box, ok in zip(extracted, correct)
-    ]
+    scores = [0.0] * len(responses)
+    boxed_idx = []
+    for i, (r, a) in enumerate(zip(responses, answer)):
+        e = extract_gsm8k_strict(r)
+        if e is not None:
+            scores[i] = 0.0 if _num_equal(e, a) else 1.0
+        elif extract_boxed(r) is not None:
+            boxed_idx.append(i)
+    if boxed_idx:
+        correct = batch_is_correct([responses[i] for i in boxed_idx], [answer[i] for i in boxed_idx])
+        for i, ok in zip(boxed_idx, correct):
+            scores[i] = 0.0 if ok else 1.0
     return scores
 
 

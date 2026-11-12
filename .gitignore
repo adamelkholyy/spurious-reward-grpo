@@ -2,6 +2,7 @@ __pycache__/
 venv/
 outputs/
 runners/__pycache__/
+tasks/chess_puzzles
 logs/
 .gitconfig
 *.sh

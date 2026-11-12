@@ -132,6 +132,19 @@ parser.add_argument(
     "The first example is the same one --single_example picks",
 )
 parser.add_argument(
+    "--resume_from",
+    default=None,
+    help="Checkpoint dir to resume from (weights, optimizer, scheduler, RNG and step count), via "
+    "Trainer.train(resume_from_checkpoint=...). --max_steps is the TOTAL step count, so resuming "
+    "checkpoint-400 with --max_steps 1000 trains 600 more steps. May point outside --output_dir",
+)
+parser.add_argument(
+    "--entropy_coeff",
+    type=float,
+    default=0.0,
+    help="verl-style entropy bonus: loss = pg_loss - entropy_coeff * token-mean entropy, defaults to 0 (off)",
+)
+parser.add_argument(
     "--range",
     type=parse_range,
     default=None,
@@ -204,6 +217,8 @@ if __name__ == "__main__":
                 "lr": args.lr,
                 "switch_step": args.switch_step,
                 "reset_optimizer_at_switch": args.reset_optimizer_at_switch,
+                "resume_from": args.resume_from,
+                "entropy_coeff": args.entropy_coeff,
                 "embed_tau": args.embed_tau,
                 "embed_model": args.embed_model,
                 "embed_mask_numbers": not args.embed_keep_numbers,

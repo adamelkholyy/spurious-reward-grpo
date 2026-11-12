@@ -22,7 +22,7 @@ python trainer.py --model Qwen/Qwen2.5-1.5B-Instruct --dataset gsm8k --reward ra
 
 Key flags:
 - `--model`: HF model id or local directory
-- `--dataset`: one of `gsm8k`, `deepscaler`, `wordle`, `countdown`, `dapo`, `aime2024`, `mbpp`, `capitals`, `numbers`
+- `--dataset`: one of `gsm8k`, `deepscaler`, `wordle`, `countdown`, `dapo`, `aime2024`, `mbpp`, `capitals`, `numbers`, `chess` (Lichess puzzles, first move only; a 10k subset built once with `python -m tasks.build_chess_subset`), `bbq` (BBQ bias benchmark, multiple choice; eval also reports BBQ bias scores)
 - `--reward`: choose  `random` for Spurious Rewards, else dataset name for the relevant ground-truth rewards (defaults to the dataset's `default_reward`). For GSM8K, `gsm8k_strategy` (α = 0.5) and `gsm8k_strategy_a025` / `gsm8k_strategy_a075` reward each correct sample by α + (1 − α)/n, where n counts the correct samples in its group sharing its strategy, i.e. the set of verified intermediate values on the path to the answer (`strategy_reward.py`). `gsm8k_embedding` (α = 0.5) and `gsm8k_embedding_a025` use a soft count of semantically similar correct solutions instead (`embedding_reward.py`): they need `--embed_tau`, calibrated on base-model rollouts with `python calibrate_embedding.py --model <base>` (which also says whether to pass `--embed_keep_numbers`); `--embed_model` picks the frozen embedder (default `BAAI/bge-small-en-v1.5`)
 - `--eps_low` / `--eps_high`: GRPO clipping bounds (default `0.2` / `0.28`, DAPO-style), `inf` disables clip-high
 - `--run_name`: wandb run name and output dir (default `<dataset>_<model>_gt_<max_steps>_s<seed>`; note it does not encode the reward or clipping bounds)

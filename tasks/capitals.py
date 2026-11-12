@@ -342,7 +342,7 @@ class CapitalsTask(DatasetSpec):
 
         return _names_a_country
 
-    def summarise_samples(self, samples_per_problem: Sequence[Sequence[str]]) -> dict:
+    def summarise_samples(self, samples_per_problem: Sequence[Sequence[str]], golds=None) -> dict:
         """Diversity metrics over the draws for the (single) eval prompt.
         Called by eval.py with one list of completions per problem."""
         texts = list(samples_per_problem[0])

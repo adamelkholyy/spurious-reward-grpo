@@ -168,7 +168,7 @@ def run_one(args):
 
     # optional task-specific summary over the raw samples (e.g. capitals diversity)
     summarise = getattr(task, "summarise_samples", None)
-    task_metrics = summarise([texts for texts, _ in jobs]) if summarise else None
+    task_metrics = summarise([texts for texts, _ in jobs], golds=[g for _, g in jobs]) if summarise else None
 
     n_prob = len(problems)
     accuracy = sum_avg / n_prob

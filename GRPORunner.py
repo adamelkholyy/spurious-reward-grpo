@@ -8,6 +8,7 @@ from rewards import get_reward_funcs, set_num_generations
 from settings import INF_EPS_HIGH, GRPO_CONFIG, HPC
 from tasks import get_task
 from ScheduledGRPOTrainer import ScheduledGRPOTrainer
+from entropy_bonus import with_entropy_bonus
 
 
 class SaveAtStepsCallback(TrainerCallback):
@@ -70,8 +71,15 @@ def run(model, tokenizer, args):
     print(f"Running on {'HPC' if HPC else 'FLAMINGO'}")
     print("=" * 100)
 
+    scheduled_cls, plain_cls = ScheduledGRPOTrainer, GRPOTrainer
+    if args.entropy_coeff:
+        assert grpo_args.loss_type == "dapo", "entropy bonus is aggregated like the dapo loss"
+        scheduled_cls = with_entropy_bonus(ScheduledGRPOTrainer, args.entropy_coeff)
+        plain_cls = with_entropy_bonus(GRPOTrainer, args.entropy_coeff)
+        print(f"Entropy bonus ON: loss = pg_loss - {args.entropy_coeff} * token-mean entropy")
+
     if args.switch_step:
-        trainer = ScheduledGRPOTrainer.with_switch(
+        trainer = scheduled_cls.with_switch(
             model=model,
             processing_class=tokenizer,
             args=grpo_args,
@@ -85,7 +93,7 @@ def run(model, tokenizer, args):
             reset_optimizer=args.reset_optimizer_at_switch,
         )
     else:
-        trainer = GRPOTrainer(
+        trainer = plain_cls(
             model=model,
             processing_class=tokenizer,
             reward_funcs=reward_funcs,
@@ -94,7 +102,7 @@ def run(model, tokenizer, args):
         )
     if args.save_at:
         trainer.add_callback(SaveAtStepsCallback(args.save_at))
-    trainer.train()
+    trainer.train(resume_from_checkpoint=getattr(args, "resume_from", None))
 
 
 def parse_epsilon_high(value):

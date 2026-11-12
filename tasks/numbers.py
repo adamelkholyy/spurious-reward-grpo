@@ -157,7 +157,7 @@ class NumbersTask(DatasetSpec):
 
         return _valid
 
-    def summarise_samples(self, samples_per_problem: Sequence[Sequence[str]]) -> dict:
+    def summarise_samples(self, samples_per_problem: Sequence[Sequence[str]], golds=None) -> dict:
         """Diversity metrics over the draws for the (single) eval prompt."""
         texts = list(samples_per_problem[0])
         gold = self._gold()
